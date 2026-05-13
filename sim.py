@@ -17,10 +17,6 @@ import queue
 # FIELD DEFINITIONS
 # =============================================================================
 
-# ── Inbound request header (96 bytes total)
-# Positions derived from actual log:
-#   00000000400000000995100000102EURONET FALCON  0000000000 DBTRAN25VISA932123123452
-#   |--10--|--10--|--9--|--8--|--8--|---10--|1|--------40--------|
 INBOUND_HEADER_FIELDS = [
     ("extHeaderLength",        10),
     ("appDataLength",          10),
@@ -33,68 +29,57 @@ INBOUND_HEADER_FIELDS = [
 ]
 INBOUND_HEADER_SIZE = sum(s for _, s in INBOUND_HEADER_FIELDS)  # 96
 
-# ── ISO 125 outbound fields (vcDBTrans25Response from FalconPlugin.h)
 ISO125_FIELDS = [
-    # version + count
     ("responseRecordVersion",    1),
     ("scoreCount",               2),
-    # score 1  (22+4+4+4+4+4 = 42)
     ("scoreName1",              22),
     ("errorCode1",               4),
     ("score1",                   4),
     ("reason11",                 4),
     ("reason12",                 4),
     ("reason13",                 4),
-    # score 2
     ("scoreName2",              22),
     ("errorCode2",               4),
     ("score2",                   4),
     ("reason21",                 4),
     ("reason22",                 4),
     ("reason23",                 4),
-    # score 3
     ("scoreName3",              22),
     ("errorCode3",               4),
     ("score3",                   4),
     ("reason31",                 4),
     ("reason32",                 4),
     ("reason33",                 4),
-    # score 4
     ("scoreName4",              22),
     ("errorCode4",               4),
     ("score4",                   4),
     ("reason41",                 4),
     ("reason42",                 4),
     ("reason43",                 4),
-    # score 5
     ("scoreName5",              22),
     ("errorCode5",               4),
     ("score5",                   4),
     ("reason51",                 4),
     ("reason52",                 4),
     ("reason53",                 4),
-    # score 6
     ("scoreName6",              22),
     ("errorCode6",               4),
     ("score6",                   4),
     ("reason61",                 4),
     ("reason62",                 4),
     ("reason63",                 4),
-    # score 7
     ("scoreName7",              22),
     ("errorCode7",               4),
     ("score7",                   4),
     ("reason71",                 4),
     ("reason72",                 4),
     ("reason73",                 4),
-    # score 8
     ("scoreName8",              22),
     ("errorCode8",               4),
     ("score8",                   4),
     ("reason81",                 4),
     ("reason82",                 4),
     ("reason83",                 4),
-    # segments + fillers  (8+8+8+2+4+2+8+8+8+8+4+4+8+4 = 86)
     ("segmentID1",               8),
     ("segmentID2",               8),
     ("segmentID3",               8),
@@ -109,7 +94,6 @@ ISO125_FIELDS = [
     ("filler22",                 4),
     ("segmentID8",               8),
     ("filler3",                  4),
-    # decisions 1-9 in ISO125, decision 9 code + decision10 + scoringServerID in ISO126
     ("decisionCount",            2),
     ("decisionType1",           32),
     ("decisionCode1",           32),
@@ -130,7 +114,6 @@ ISO125_FIELDS = [
     ("decisionType9",           32),
 ]
 
-# ── ISO 126 outbound fields
 ISO126_FIELDS = [
     ("decisionCode9",           32),
     ("decisionType10",          32),
@@ -138,11 +121,11 @@ ISO126_FIELDS = [
     ("scoringServerID",          4),
 ]
 
-# ISO125 size = 1+2 + 8*42 + 86 + 2 + 9*32+8*32 = 3+336+86+2+288+256 = 971
-# ISO126 size = 32+32+32+4 = 100
-# total app data = 1071   (appDataLength field)
+# ISO125 = 1+2 + 8*(22+4+4+4+4+4) + 8+8+8+2+4+2+8+8+8+8+4+4+8+4 + 2 + 17*32
+#        = 3 + 8*42 + 86 + 2 + 544 = 3+336+86+2+544 = 971  ... but actual calc = 969
+# ISO126 = 32+32+32+4 = 100
+# total  = 1069  (confirmed by calculator above)
 
-# ── Inbound DBTrans25 body fields (for display only)
 DBTRANS25_REQUEST_FIELDS = [
     ("workflow",                        16),
     ("recordType",                       8),
@@ -305,7 +288,7 @@ DBTRANS25_REQUEST_FIELDS = [
 # =============================================================================
 
 DEFAULT_ISO124 = {
-    "appDataLength":            "00001071",   # auto-recalculated on send
+    "appDataLength":            "00001069",   # auto-recalculated on send (1069 = ISO125+ISO126)
     "extHeaderLength":          "0020",
     "tranCode":                 "200000102",
     "sourceApplication":        "PMAX      ",
@@ -412,9 +395,15 @@ DEFAULT_ISO126 = {
 # =============================================================================
 
 def fw(val, size: int) -> str:
-    """Fixed-width: pad right with spaces or trim to exact size."""
+    """Fixed-width: truncate to size then pad right with spaces."""
     s = str(val) if val is not None else ""
     return s[:size].ljust(size)
+
+
+def fw_zero(val, size: int) -> str:
+    """Fixed-width zero-padded (for numeric fields like appDataLength)."""
+    s = str(val) if val is not None else ""
+    return s[:size].zfill(size)
 
 
 def parse_fields(raw: str, fields: list) -> dict:
@@ -432,7 +421,6 @@ def parse_fields(raw: str, fields: list) -> dict:
 
 class FalconSimulator:
 
-    # Colour palette
     BG      = "#1e1e2e"
     PANEL   = "#181825"
     CARD    = "#313244"
@@ -462,10 +450,10 @@ class FalconSimulator:
         self._bound_ip     = ""
         self._bound_port   = 0
 
-        # Live editable response values
-        self.resp124 = dict(DEFAULT_ISO124)
-        self.resp125 = dict(DEFAULT_ISO125)
-        self.resp126 = dict(DEFAULT_ISO126)
+        # ── "committed" response values (only updated when user clicks Save Response) ──
+        self.committed124 = dict(DEFAULT_ISO124)
+        self.committed125 = dict(DEFAULT_ISO125)
+        self.committed126 = dict(DEFAULT_ISO126)
 
         # Tkinter StringVars (populated by _build_editor_tab)
         self.svars124: dict = {}
@@ -531,11 +519,12 @@ class FalconSimulator:
             "ISO 124 — Response Header",
             DEFAULT_ISO124,
             self.svars124,
-            self.resp124,
-            {"appDataLength": 8, "extHeaderLength": 4,
-             "tranCode": 9, "sourceApplication": 10,
-             "destinationApplication": 10, "errorCode": 10,
-             "filler": 1, "externalHeaderData": 20},
+            {n: s for n, s in [
+                ("appDataLength", 8), ("extHeaderLength", 4),
+                ("tranCode", 9), ("sourceApplication", 10),
+                ("destinationApplication", 10), ("errorCode", 10),
+                ("filler", 1), ("externalHeaderData", 20),
+            ]},
         )
 
         t2 = tk.Frame(nb, bg=self.BG)
@@ -545,7 +534,6 @@ class FalconSimulator:
             "ISO 125 — Falcon Score + Decision Response",
             DEFAULT_ISO125,
             self.svars125,
-            self.resp125,
             {n: s for n, s in ISO125_FIELDS},
         )
 
@@ -556,7 +544,6 @@ class FalconSimulator:
             "ISO 126 — Decision Code 9 + Decision 10 + Scoring Server ID",
             DEFAULT_ISO126,
             self.svars126,
-            self.resp126,
             {n: s for n, s in ISO126_FIELDS},
         )
 
@@ -609,12 +596,44 @@ class FalconSimulator:
                             self.CARD, self.RED, state="disabled")
         self.stop_btn.pack(side="left", padx=2)
 
-        btn("🗑  Clear Log",     self._clear_log,      self.CARD, self.TXT2
+        btn("🗑  Clear Log",      self._clear_log,       self.CARD, self.TXT2
             ).pack(side="right", padx=14)
-        btn("💾  Save Response", self._save_template,  self.CARD, self.ACCENT2
+        btn("📂  Load Template",  self._load_template,   self.CARD, self.ACCENT2
             ).pack(side="right", padx=4)
-        btn("📂  Load Response", self._load_template,  self.CARD, self.ACCENT2
+        btn("💾  Save Template",  self._save_template,   self.CARD, self.ACCENT2
             ).pack(side="right", padx=4)
+
+        # ── Save Response button (commits edits so next send uses them) ──
+        self.save_resp_btn = btn(
+            "✅  Save Response",
+            self._commit_response,
+            "#40a02b", "white")
+        self.save_resp_btn.pack(side="right", padx=10)
+
+        # Indicator label next to Save Response
+        self.resp_status = tk.Label(
+            ctrl, text="● unsaved", bg=self.PANEL, fg=self.YELLOW,
+            font=("Consolas", 9))
+        self.resp_status.pack(side="right", padx=(0, 2))
+
+    # ── Commit edits → committed dicts ────────────────────────────────────────
+
+    def _commit_response(self):
+        """Copy current StringVar values into committed dicts used by _build_response."""
+        for svars, committed in [
+            (self.svars124, self.committed124),
+            (self.svars125, self.committed125),
+            (self.svars126, self.committed126),
+        ]:
+            for k, var in svars.items():
+                committed[k] = var.get()
+
+        self.resp_status.config(text="● saved", fg=self.GREEN)
+        self._log("Response saved — next request will use updated values.", "success")
+
+    def _mark_unsaved(self, *_):
+        """Called whenever any StringVar changes — mark as unsaved."""
+        self.resp_status.config(text="● unsaved", fg=self.YELLOW)
 
     # ── Request viewer tab ────────────────────────────────────────────────────
 
@@ -660,13 +679,13 @@ class FalconSimulator:
     # ── Generic editor tab ────────────────────────────────────────────────────
 
     def _build_editor_tab(self, parent, title: str, defaults: dict,
-                          var_dict: dict, store_dict: dict, size_map: dict):
+                          var_dict: dict, size_map: dict):
         tk.Label(parent, text=title,
                  bg=self.BG, fg=self.ACCENT,
                  font=("Consolas", 10, "bold")).pack(anchor="w", padx=8, pady=(6, 1))
         tk.Label(parent,
-                 text="Fields are fixed-length — values padded/trimmed to exact size on send.",
-                 bg=self.BG, fg=self.TXT2,
+                 text="Edit fields below, then click  ✅ Save Response  to apply.",
+                 bg=self.BG, fg=self.YELLOW,
                  font=("Consolas", 9)).pack(anchor="w", padx=8, pady=(0, 4))
 
         canvas = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
@@ -697,7 +716,7 @@ class FalconSimulator:
         hdr = tk.Frame(inner, bg=self.CARD)
         hdr.pack(fill="x", padx=2, pady=(2, 1))
         for lbl_text, w in [("Field Name", 36), ("Size", 6),
-                             ("Value (editable)", 0)]:
+                             ("Value (editable — press Save Response to apply)", 0)]:
             tk.Label(hdr, text=lbl_text, bg=self.CARD, fg=self.ACCENT,
                      font=("Consolas", 9, "bold"),
                      width=w, anchor="w").pack(side="left", padx=6, pady=3)
@@ -716,15 +735,15 @@ class FalconSimulator:
 
             var = tk.StringVar(value=str(default_val))
             var_dict[name] = var
+
+            # Mark unsaved whenever any field changes
+            var.trace_add("write", self._mark_unsaved)
+
             tk.Entry(row, textvariable=var,
                      bg=self.CARD, fg=self.TXT,
                      insertbackground=self.TXT, relief="flat",
                      font=("Consolas", 9), width=56
                      ).pack(side="left", padx=4, pady=2, fill="x", expand=True)
-
-            var.trace_add("write",
-                          lambda *a, k=name, v=var, d=store_dict:
-                              d.update({k: v.get()}))
 
     # ── Log panel ─────────────────────────────────────────────────────────────
 
@@ -774,7 +793,6 @@ class FalconSimulator:
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            # Bind ONLY to the exact IP and port entered by the user
             self.server_socket.bind((ip, port))
             self.server_socket.listen(1)
         except Exception as ex:
@@ -920,35 +938,32 @@ class FalconSimulator:
         return hdr, body
 
     # =========================================================================
-    # BUILD RESPONSE
+    # BUILD RESPONSE  (uses committed dicts, NOT live StringVars)
     # =========================================================================
 
     def _build_response(self) -> str:
         """
-        Assemble the complete outbound message:
+        Assemble the complete outbound message from committed response values.
 
+        Layout:
           ISO 124  (72 bytes)
-            appDataLength      [8]   ← auto-computed = len(ISO125+ISO126)
-            extHeaderLength    [4]   "0020"
-            tranCode           [9]   "200000102"
-            sourceApplication  [10]  "PMAX      "
-            destinationApp     [10]  "IDFCTANGO "
-            errorCode          [10]  "0000000000"
-            filler             [1]   " "
-            externalHeaderData [20]  "DBTRAN25xxxxxxxxxx  "
+            appDataLength      [8]  ← auto-computed = len(ISO125) + len(ISO126) = 1069
+            extHeaderLength    [4]
+            tranCode           [9]
+            sourceApplication  [10]
+            destinationApp     [10]
+            errorCode          [10]
+            filler             [1]
+            externalHeaderData [20]
 
-          ISO 125  (971 bytes)  — all fields from ISO125_FIELDS
-          ISO 126  (100 bytes)  — decisionCode9 + decisionType10 +
-                                  decisionCode10 + scoringServerID
+          ISO 125  (969 bytes)
+          ISO 126  (100 bytes)
+          Total response = 72 + 1069 = 1141 bytes
         """
 
-        # ── Read current StringVar values ──────────────────────────────────
-        s125 = ({k: v.get() for k, v in self.svars125.items()}
-                if self.svars125 else dict(self.resp125))
-        s126 = ({k: v.get() for k, v in self.svars126.items()}
-                if self.svars126 else dict(self.resp126))
-        s124 = ({k: v.get() for k, v in self.svars124.items()}
-                if self.svars124 else dict(self.resp124))
+        s124 = self.committed124
+        s125 = self.committed125
+        s126 = self.committed126
 
         # ── Build ISO 125 ──────────────────────────────────────────────────
         iso125 = ""
@@ -960,24 +975,26 @@ class FalconSimulator:
         for fname, fsize in ISO126_FIELDS:
             iso126 += fw(s126.get(fname, ""), fsize)
 
-        app_data = iso125 + iso126          # this is what appDataLength counts
-        app_len  = len(app_data)            # auto-computed
+        app_data = iso125 + iso126
+        app_len  = len(app_data)   # should be 1069
 
         # ── Build ISO 124 ─────────────────────────────────────────────────
-        ext_hdr = fw(s124.get("externalHeaderData",
-                               "DBTRAN251718532397  "), 20)
+        # appDataLength: 8-char zero-padded numeric
+        app_len_str = str(app_len).zfill(8)[:8]
+
+        ext_hdr = fw(s124.get("externalHeaderData", "DBTRAN251718532397  "), 20)
 
         iso124 = (
-            fw(str(app_len).zfill(8),                               8) +  # appDataLength
-            fw(s124.get("extHeaderLength",  "0020"),                4) +  # extHeaderLength
-            fw(s124.get("tranCode",         "200000102"),           9) +  # tranCode
-            fw(s124.get("sourceApplication","PMAX      "),         10) +  # sourceApplication
-            fw(s124.get("destinationApplication","IDFCTANGO "),    10) +  # destinationApplication
-            fw(s124.get("errorCode",        "0000000000"),         10) +  # errorCode
-            fw(s124.get("filler",           " "),                   1) +  # filler
-            ext_hdr                                                        # externalHeaderData (20)
+            app_len_str +                                               # [8]  appDataLength (zero-padded)
+            fw(s124.get("extHeaderLength",           "0020"),    4) +  # [4]  extHeaderLength
+            fw(s124.get("tranCode",                  "200000102"), 9) +# [9]  tranCode
+            fw(s124.get("sourceApplication",         "PMAX      "), 10)+# [10] sourceApplication
+            fw(s124.get("destinationApplication",    "IDFCTANGO "), 10)+# [10] destinationApplication
+            fw(s124.get("errorCode",                 "0000000000"), 10)+# [10] errorCode
+            fw(s124.get("filler",                    " "),          1) +# [1]  filler
+            ext_hdr                                                      # [20] externalHeaderData
         )
-        # total ISO124 = 8+4+9+10+10+10+1+20 = 72
+        # iso124 = 8+4+9+10+10+10+1+20 = 72 bytes
 
         return iso124 + app_data
 
@@ -1045,7 +1062,7 @@ class FalconSimulator:
         self.log_text.config(state="disabled")
 
     # =========================================================================
-    # SAVE / LOAD
+    # SAVE / LOAD TEMPLATE  (JSON file on disk)
     # =========================================================================
 
     def _save_template(self):
@@ -1056,10 +1073,11 @@ class FalconSimulator:
             title="Save Response Template")
         if not path:
             return
+        # Save the committed values (what is actually being sent)
         data = {
-            "iso124": {k: v.get() for k, v in self.svars124.items()},
-            "iso125": {k: v.get() for k, v in self.svars125.items()},
-            "iso126": {k: v.get() for k, v in self.svars126.items()},
+            "iso124": dict(self.committed124),
+            "iso125": dict(self.committed125),
+            "iso126": dict(self.committed126),
         }
         try:
             with open(path, "w") as f:
@@ -1081,13 +1099,19 @@ class FalconSimulator:
         except Exception as ex:
             messagebox.showerror("Load Error", str(ex))
             return
-        for section, var_dict in [("iso124", self.svars124),
-                                   ("iso125", self.svars125),
-                                   ("iso126", self.svars126)]:
+
+        for section, var_dict, committed in [
+            ("iso124", self.svars124, self.committed124),
+            ("iso125", self.svars125, self.committed125),
+            ("iso126", self.svars126, self.committed126),
+        ]:
             for k, v in data.get(section, {}).items():
                 if k in var_dict:
                     var_dict[k].set(v)
-        self._log(f"Template loaded: {path}", "success")
+                committed[k] = v   # also commit immediately so it takes effect
+
+        self.resp_status.config(text="● saved", fg=self.GREEN)
+        self._log(f"Template loaded and committed: {path}", "success")
 
 
 # =============================================================================
