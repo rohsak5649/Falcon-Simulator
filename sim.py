@@ -8,18 +8,20 @@ Internal Tool — IDFC First Bank / Euronet Integration
 import socket
 import threading
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, font
+from tkinter import ttk, scrolledtext, messagebox
 import datetime
 import json
-import os
 import queue
 
-# ─────────────────────────────────────────────────────────────────────────────
-# MESSAGE FIELD DEFINITIONS
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# FIELD DEFINITIONS
+# =============================================================================
 
-# Header fields (ISO 124 equivalent)
-HEADER_FIELDS = [
+# ── Inbound request header (96 bytes total)
+# Positions derived from actual log:
+#   00000000400000000995100000102EURONET FALCON  0000000000 DBTRAN25VISA932123123452
+#   |--10--|--10--|--9--|--8--|--8--|---10--|1|--------40--------|
+INBOUND_HEADER_FIELDS = [
     ("extHeaderLength",        10),
     ("appDataLength",          10),
     ("tranCode",                9),
@@ -29,8 +31,118 @@ HEADER_FIELDS = [
     ("filler",                  1),
     ("externalHeaderData",     40),
 ]
+INBOUND_HEADER_SIZE = sum(s for _, s in INBOUND_HEADER_FIELDS)  # 96
 
-# DBTrans25 request fields
+# ── ISO 125 outbound fields (vcDBTrans25Response from FalconPlugin.h)
+ISO125_FIELDS = [
+    # version + count
+    ("responseRecordVersion",    1),
+    ("scoreCount",               2),
+    # score 1  (22+4+4+4+4+4 = 42)
+    ("scoreName1",              22),
+    ("errorCode1",               4),
+    ("score1",                   4),
+    ("reason11",                 4),
+    ("reason12",                 4),
+    ("reason13",                 4),
+    # score 2
+    ("scoreName2",              22),
+    ("errorCode2",               4),
+    ("score2",                   4),
+    ("reason21",                 4),
+    ("reason22",                 4),
+    ("reason23",                 4),
+    # score 3
+    ("scoreName3",              22),
+    ("errorCode3",               4),
+    ("score3",                   4),
+    ("reason31",                 4),
+    ("reason32",                 4),
+    ("reason33",                 4),
+    # score 4
+    ("scoreName4",              22),
+    ("errorCode4",               4),
+    ("score4",                   4),
+    ("reason41",                 4),
+    ("reason42",                 4),
+    ("reason43",                 4),
+    # score 5
+    ("scoreName5",              22),
+    ("errorCode5",               4),
+    ("score5",                   4),
+    ("reason51",                 4),
+    ("reason52",                 4),
+    ("reason53",                 4),
+    # score 6
+    ("scoreName6",              22),
+    ("errorCode6",               4),
+    ("score6",                   4),
+    ("reason61",                 4),
+    ("reason62",                 4),
+    ("reason63",                 4),
+    # score 7
+    ("scoreName7",              22),
+    ("errorCode7",               4),
+    ("score7",                   4),
+    ("reason71",                 4),
+    ("reason72",                 4),
+    ("reason73",                 4),
+    # score 8
+    ("scoreName8",              22),
+    ("errorCode8",               4),
+    ("score8",                   4),
+    ("reason81",                 4),
+    ("reason82",                 4),
+    ("reason83",                 4),
+    # segments + fillers  (8+8+8+2+4+2+8+8+8+8+4+4+8+4 = 86)
+    ("segmentID1",               8),
+    ("segmentID2",               8),
+    ("segmentID3",               8),
+    ("filler11",                 2),
+    ("filler12",                 4),
+    ("filler13",                 2),
+    ("segmentID4",               8),
+    ("segmentID5",               8),
+    ("segmentID6",               8),
+    ("segmentID7",               8),
+    ("filler21",                 4),
+    ("filler22",                 4),
+    ("segmentID8",               8),
+    ("filler3",                  4),
+    # decisions 1-9 in ISO125, decision 9 code + decision10 + scoringServerID in ISO126
+    ("decisionCount",            2),
+    ("decisionType1",           32),
+    ("decisionCode1",           32),
+    ("decisionType2",           32),
+    ("decisionCode2",           32),
+    ("decisionType3",           32),
+    ("decisionCode3",           32),
+    ("decisionType4",           32),
+    ("decisionCode4",           32),
+    ("decisionType5",           32),
+    ("decisionCode5",           32),
+    ("decisionType6",           32),
+    ("decisionCode6",           32),
+    ("decisionType7",           32),
+    ("decisionCode7",           32),
+    ("decisionType8",           32),
+    ("decisionCode8",           32),
+    ("decisionType9",           32),
+]
+
+# ── ISO 126 outbound fields
+ISO126_FIELDS = [
+    ("decisionCode9",           32),
+    ("decisionType10",          32),
+    ("decisionCode10",          32),
+    ("scoringServerID",          4),
+]
+
+# ISO125 size = 1+2 + 8*42 + 86 + 2 + 9*32+8*32 = 3+336+86+2+288+256 = 971
+# ISO126 size = 32+32+32+4 = 100
+# total app data = 1071   (appDataLength field)
+
+# ── Inbound DBTrans25 body fields (for display only)
 DBTRANS25_REQUEST_FIELDS = [
     ("workflow",                        16),
     ("recordType",                       8),
@@ -188,591 +300,471 @@ DBTRANS25_REQUEST_FIELDS = [
     ("segmentId4",                       6),
 ]
 
-# DBTrans25 response fields (ISO 125)
-DBTRANS25_RESPONSE_FIELDS = [
-    ("responseRecordVersion",    1),
-    ("scoreCount",               2),
-    ("scoreName1",              22),
-    ("errorCode1",               4),
-    ("score1",                   4),
-    ("reason11",                 4),
-    ("reason12",                 4),
-    ("reason13",                 4),
-    ("scoreName2",              22),
-    ("errorCode2",               4),
-    ("score2",                   4),
-    ("reason21",                 4),
-    ("reason22",                 4),
-    ("reason23",                 4),
-    ("scoreName3",              22),
-    ("errorCode3",               4),
-    ("score3",                   4),
-    ("reason31",                 4),
-    ("reason32",                 4),
-    ("reason33",                 4),
-    ("scoreName4",              22),
-    ("errorCode4",               4),
-    ("score4",                   4),
-    ("reason41",                 4),
-    ("reason42",                 4),
-    ("reason43",                 4),
-    ("scoreName5",              22),
-    ("errorCode5",               4),
-    ("score5",                   4),
-    ("reason51",                 4),
-    ("reason52",                 4),
-    ("reason53",                 4),
-    ("scoreName6",              22),
-    ("errorCode6",               4),
-    ("score6",                   4),
-    ("reason61",                 4),
-    ("reason62",                 4),
-    ("reason63",                 4),
-    ("scoreName7",              22),
-    ("errorCode7",               4),
-    ("score7",                   4),
-    ("reason71",                 4),
-    ("reason72",                 4),
-    ("reason73",                 4),
-    ("scoreName8",              22),
-    ("errorCode8",               4),
-    ("score8",                   4),
-    ("reason81",                 4),
-    ("reason82",                 4),
-    ("reason83",                 4),
-    ("segmentID1",               8),
-    ("segmentID2",               8),
-    ("segmentID3",               8),
-    ("filler11",                 2),
-    ("filler12",                 4),
-    ("filler13",                 2),
-    ("segmentID4",               8),
-    ("segmentID5",               8),
-    ("segmentID6",               8),
-    ("segmentID7",               8),
-    ("filler21",                 4),
-    ("filler22",                 4),
-    ("segmentID8",               8),
-    ("filler3",                  4),
-    ("decisionCount",            2),
-    ("decisionType1",           32),
-    ("decisionCode1",           32),
-    ("decisionType2",           32),
-    ("decisionCode2",           32),
-    ("decisionType3",           32),
-    ("decisionCode3",           32),
-    ("decisionType4",           32),
-    ("decisionCode4",           32),
-    ("decisionType5",           32),
-    ("decisionCode5",           32),
-    ("decisionType6",           32),
-    ("decisionCode6",           32),
-    ("decisionType7",           32),
-    ("decisionCode7",           32),
-    ("decisionType8",           32),
-    ("decisionCode8",           32),
-    ("decisionType9",           32),
-    ("decisionCode9",           32),
-    ("decisionType10",          32),
-    ("decisionCode10",          32),
-    ("scoringServerID",          4),
-]
+# =============================================================================
+# DEFAULT RESPONSE VALUES
+# =============================================================================
 
-# Response header fields (ISO 124 response)
-RESPONSE_HEADER_FIELDS = [
-    ("appDataLength",           8),
-    ("extHeaderLength",         4),
-    ("tranCode",                9),
-    ("sourceApplication",      10),
-    ("destinationApplication", 10),
-    ("errorCode",              10),
-    ("filler",                  1),
-    ("externalHeaderData",     20),
-]
+DEFAULT_ISO124 = {
+    "appDataLength":            "00001071",   # auto-recalculated on send
+    "extHeaderLength":          "0020",
+    "tranCode":                 "200000102",
+    "sourceApplication":        "PMAX      ",
+    "destinationApplication":   "IDFCTANGO ",
+    "errorCode":                "0000000000",
+    "filler":                   " ",
+    "externalHeaderData":       "DBTRAN251718532397  ",
+}
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PARSER / BUILDER UTILITIES
-# ─────────────────────────────────────────────────────────────────────────────
+DEFAULT_ISO125 = {
+    "responseRecordVersion":   "4",
+    "scoreCount":              " 1",
+    "scoreName1":              "FFM.FRD.CARD          ",
+    "errorCode1":              "   0",
+    "score1":                  "  12",
+    "reason11":                "   2",
+    "reason12":                "  12",
+    "reason13":                "   3",
+    "scoreName2":              " " * 22,
+    "errorCode2":              "    ",
+    "score2":                  "    ",
+    "reason21":                "    ",
+    "reason22":                "    ",
+    "reason23":                "    ",
+    "scoreName3":              " " * 22,
+    "errorCode3":              "    ",
+    "score3":                  "    ",
+    "reason31":                "    ",
+    "reason32":                "    ",
+    "reason33":                "    ",
+    "scoreName4":              " " * 22,
+    "errorCode4":              "    ",
+    "score4":                  "    ",
+    "reason41":                "    ",
+    "reason42":                "    ",
+    "reason43":                "    ",
+    "scoreName5":              " " * 22,
+    "errorCode5":              "    ",
+    "score5":                  "    ",
+    "reason51":                "    ",
+    "reason52":                "    ",
+    "reason53":                "    ",
+    "scoreName6":              " " * 22,
+    "errorCode6":              "    ",
+    "score6":                  "    ",
+    "reason61":                "    ",
+    "reason62":                "    ",
+    "reason63":                "    ",
+    "scoreName7":              " " * 22,
+    "errorCode7":              "    ",
+    "score7":                  "    ",
+    "reason71":                "    ",
+    "reason72":                "    ",
+    "reason73":                "    ",
+    "scoreName8":              " " * 22,
+    "errorCode8":              "    ",
+    "score8":                  "    ",
+    "reason81":                "    ",
+    "reason82":                "    ",
+    "reason83":                "    ",
+    "segmentID1":              "gid180a1",
+    "segmentID2":              "        ",
+    "segmentID3":              "        ",
+    "filler11":                "  ",
+    "filler12":                "    ",
+    "filler13":                "  ",
+    "segmentID4":              "        ",
+    "segmentID5":              "        ",
+    "segmentID6":              "        ",
+    "segmentID7":              "        ",
+    "filler21":                "    ",
+    "filler22":                "    ",
+    "segmentID8":              "        ",
+    "filler3":                 "    ",
+    "decisionCount":           " 0",
+    "decisionType1":           " " * 32,
+    "decisionCode1":           " " * 32,
+    "decisionType2":           " " * 32,
+    "decisionCode2":           " " * 32,
+    "decisionType3":           " " * 32,
+    "decisionCode3":           " " * 32,
+    "decisionType4":           " " * 32,
+    "decisionCode4":           " " * 32,
+    "decisionType5":           " " * 32,
+    "decisionCode5":           " " * 32,
+    "decisionType6":           " " * 32,
+    "decisionCode6":           " " * 32,
+    "decisionType7":           " " * 32,
+    "decisionCode7":           " " * 32,
+    "decisionType8":           " " * 32,
+    "decisionCode8":           " " * 32,
+    "decisionType9":           " " * 32,
+}
 
-def parse_fixed_fields(raw: str, fields: list) -> dict:
+DEFAULT_ISO126 = {
+    "decisionCode9":           " " * 32,
+    "decisionType10":          " " * 32,
+    "decisionCode10":          " " * 32,
+    "scoringServerID":         "    ",
+}
+
+# =============================================================================
+# UTILITIES
+# =============================================================================
+
+def fw(val, size: int) -> str:
+    """Fixed-width: pad right with spaces or trim to exact size."""
+    s = str(val) if val is not None else ""
+    return s[:size].ljust(size)
+
+
+def parse_fields(raw: str, fields: list) -> dict:
     result = {}
     pos = 0
     for name, size in fields:
-        chunk = raw[pos:pos+size]
-        result[name] = chunk
+        result[name] = raw[pos:pos + size]
         pos += size
     return result
 
-def build_fixed_message(values: dict, fields: list) -> str:
-    msg = ""
-    for name, size in fields:
-        val = values.get(name, "")
-        val = str(val)
-        if len(val) > size:
-            val = val[:size]
-        else:
-            val = val.ljust(size)
-        msg += val
-    return msg
 
-def parse_incoming_message(raw: str) -> dict:
-    """Parse the full incoming request message into named fields."""
-    result = {"_raw": raw, "_sections": {}}
-
-    # Header: first 56 bytes (10+10+9+8+8+10+1) = 56, then extHeaderData is 40 → total 96
-    hdr_total = sum(s for _, s in HEADER_FIELDS)
-    hdr = parse_fixed_fields(raw[:hdr_total], HEADER_FIELDS)
-    result["_sections"]["header"] = hdr
-
-    # App data starts after header
-    try:
-        ext_hdr_len = int(hdr.get("extHeaderLength", "40").strip() or "40")
-    except:
-        ext_hdr_len = 40
-    app_start = hdr_total
-    app_raw = raw[app_start:]
-    req = parse_fixed_fields(app_raw, DBTRANS25_REQUEST_FIELDS)
-    result["_sections"]["request"] = req
-
-    result.update(hdr)
-    result.update(req)
-    return result
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DEFAULT RESPONSE TEMPLATE
-# ─────────────────────────────────────────────────────────────────────────────
-
-DEFAULT_RESPONSE_ISO124 = {
-    "appDataLength":           "00001069",
-    "extHeaderLength":         "0020",
-    "tranCode":                "200000102",
-    "sourceApplication":       "PMAX      ",
-    "destinationApplication":  "IDFCTANGO ",
-    "errorCode":               "0000000000",
-    "filler":                  " ",
-    "externalHeaderData":      "DBTRAN251718532397  ",
-}
-
-DEFAULT_RESPONSE_ISO125 = {
-    "responseRecordVersion":  "4",
-    "scoreCount":             " 1",
-    "scoreName1":             "FFM.FRD.CARD          ",
-    "errorCode1":             "   0",
-    "score1":                 "  12",
-    "reason11":               "   2",
-    "reason12":               "  12",
-    "reason13":               "   3",
-    "scoreName2":             "                      ",
-    "errorCode2":             "    ",
-    "score2":                 "    ",
-    "reason21":               "    ",
-    "reason22":               "    ",
-    "reason23":               "    ",
-    "scoreName3":             "                      ",
-    "errorCode3":             "    ",
-    "score3":                 "    ",
-    "reason31":               "    ",
-    "reason32":               "    ",
-    "reason33":               "    ",
-    "scoreName4":             "                      ",
-    "errorCode4":             "    ",
-    "score4":                 "    ",
-    "reason41":               "    ",
-    "reason42":               "    ",
-    "reason43":               "    ",
-    "scoreName5":             "                      ",
-    "errorCode5":             "    ",
-    "score5":                 "    ",
-    "reason51":               "    ",
-    "reason52":               "    ",
-    "reason53":               "    ",
-    "scoreName6":             "                      ",
-    "errorCode6":             "    ",
-    "score6":                 "    ",
-    "reason61":               "    ",
-    "reason62":               "    ",
-    "reason63":               "    ",
-    "scoreName7":             "                      ",
-    "errorCode7":             "    ",
-    "score7":                 "    ",
-    "reason71":               "    ",
-    "reason72":               "    ",
-    "reason73":               "    ",
-    "scoreName8":             "                      ",
-    "errorCode8":             "    ",
-    "score8":                 "    ",
-    "reason81":               "    ",
-    "reason82":               "    ",
-    "reason83":               "    ",
-    "segmentID1":             "gid180a1",
-    "segmentID2":             "        ",
-    "segmentID3":             "        ",
-    "filler11":               "  ",
-    "filler12":               "    ",
-    "filler13":               "  ",
-    "segmentID4":             "        ",
-    "segmentID5":             "        ",
-    "segmentID6":             "        ",
-    "segmentID7":             "        ",
-    "filler21":               "    ",
-    "filler22":               "    ",
-    "segmentID8":             "        ",
-    "filler3":                "    ",
-    "decisionCount":          " 0",
-    "decisionType1":          " " * 32,
-    "decisionCode1":          " " * 32,
-    "decisionType2":          " " * 32,
-    "decisionCode2":          " " * 32,
-    "decisionType3":          " " * 32,
-    "decisionCode3":          " " * 32,
-    "decisionType4":          " " * 32,
-    "decisionCode4":          " " * 32,
-    "decisionType5":          " " * 32,
-    "decisionCode5":          " " * 32,
-    "decisionType6":          " " * 32,
-    "decisionCode6":          " " * 32,
-    "decisionType7":          " " * 32,
-    "decisionCode7":          " " * 32,
-    "decisionType8":          " " * 32,
-    "decisionCode8":          " " * 32,
-    "decisionType9":          " " * 32,
-    "decisionCode9":          " " * 32,
-    "decisionType10":         " " * 32,
-    "decisionCode10":         " " * 32,
-    "scoringServerID":        "    ",
-}
-
-DEFAULT_RESPONSE_ISO126 = {
-    "decisionCode10_ext":     " " * 32,
-    "scoringServerID_ext":    " " * 32,
-    "padding":                " " * 36,
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # MAIN APPLICATION
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 
 class FalconSimulator:
-    def __init__(self, root):
+
+    # Colour palette
+    BG      = "#1e1e2e"
+    PANEL   = "#181825"
+    CARD    = "#313244"
+    ACCENT  = "#cba6f7"
+    ACCENT2 = "#89b4fa"
+    TXT     = "#cdd6f4"
+    TXT2    = "#a6adc8"
+    GREEN   = "#a6e3a1"
+    RED     = "#f38ba8"
+    YELLOW  = "#f9e2af"
+    BORDER  = "#45475a"
+    ORANGE  = "#fab387"
+
+    def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Euronet Falcon TCP Simulator  —  Developed by Rohan Sakhare")
-        self.root.geometry("1400x900")
+        self.root.title(
+            "Euronet Falcon TCP Simulator  —  Developed by Rohan Sakhare")
+        self.root.geometry("1440x920")
         self.root.minsize(1100, 700)
-        self.root.configure(bg="#1e1e2e")
+        self.root.configure(bg=self.BG)
 
         self.server_socket = None
         self.server_thread = None
-        self.running = False
-        self.client_conn = None
-        self.client_addr = None
-        self.log_queue = queue.Queue()
+        self.running       = False
+        self.client_conn   = None
+        self.log_queue     = queue.Queue()
+        self._bound_ip     = ""
+        self._bound_port   = 0
 
-        # Response templates (editable)
-        self.resp_iso124 = dict(DEFAULT_RESPONSE_ISO124)
-        self.resp_iso125 = dict(DEFAULT_RESPONSE_ISO125)
-        self.resp_iso126 = dict(DEFAULT_RESPONSE_ISO126)
+        # Live editable response values
+        self.resp124 = dict(DEFAULT_ISO124)
+        self.resp125 = dict(DEFAULT_ISO125)
+        self.resp126 = dict(DEFAULT_ISO126)
 
-        # UI entry vars for response fields
-        self.resp_vars_124 = {}
-        self.resp_vars_125 = {}
-        self.resp_vars_126 = {}
+        # Tkinter StringVars (populated by _build_editor_tab)
+        self.svars124: dict = {}
+        self.svars125: dict = {}
+        self.svars126: dict = {}
 
         self._build_ui()
-        self._poll_log_queue()
+        self._poll_log()
 
-    # ─── UI CONSTRUCTION ────────────────────────────────────────────────────
+    # =========================================================================
+    # UI
+    # =========================================================================
 
     def _build_ui(self):
-        DARK_BG    = "#1e1e2e"
-        PANEL_BG   = "#181825"
-        CARD_BG    = "#313244"
-        ACCENT     = "#cba6f7"
-        ACCENT2    = "#89b4fa"
-        TEXT_PRI   = "#cdd6f4"
-        TEXT_SEC   = "#a6adc8"
-        GREEN      = "#a6e3a1"
-        RED        = "#f38ba8"
-        YELLOW     = "#f9e2af"
-        BORDER     = "#45475a"
+        self._apply_styles()
 
-        self._colors = dict(
-            DARK_BG=DARK_BG, PANEL_BG=PANEL_BG, CARD_BG=CARD_BG,
-            ACCENT=ACCENT, ACCENT2=ACCENT2, TEXT_PRI=TEXT_PRI,
-            TEXT_SEC=TEXT_SEC, GREEN=GREEN, RED=RED, YELLOW=YELLOW, BORDER=BORDER
-        )
-
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("TNotebook",        background=DARK_BG, borderwidth=0)
-        style.configure("TNotebook.Tab",    background=CARD_BG, foreground=TEXT_SEC,
-                        padding=[14, 6], font=("Consolas", 10))
-        style.map("TNotebook.Tab",
-                  background=[("selected", PANEL_BG)],
-                  foreground=[("selected", ACCENT)])
-        style.configure("TFrame",           background=DARK_BG)
-        style.configure("TLabel",           background=DARK_BG, foreground=TEXT_PRI,
-                        font=("Consolas", 10))
-        style.configure("TEntry",           fieldbackground=CARD_BG, foreground=TEXT_PRI,
-                        insertcolor=TEXT_PRI, borderwidth=1, relief="flat")
-        style.configure("TScrollbar",       background=CARD_BG, troughcolor=PANEL_BG,
-                        arrowcolor=TEXT_SEC)
-        style.configure("Vertical.TScrollbar", background=CARD_BG)
-
-        # ── TOP BANNER ──
+        # Banner
         banner = tk.Frame(self.root, bg="#11111b", height=52)
-        banner.pack(fill="x", side="top")
+        banner.pack(fill="x")
         banner.pack_propagate(False)
-
-        tk.Label(banner, text="🦅  EURONET FALCON TCP SIMULATOR",
-                 bg="#11111b", fg=ACCENT,
+        tk.Label(banner,
+                 text="🦅  EURONET FALCON TCP SIMULATOR",
+                 bg="#11111b", fg=self.ACCENT,
                  font=("Consolas", 14, "bold")).pack(side="left", padx=20, pady=12)
-        tk.Label(banner, text="Developed by Rohan Sakhare",
-                 bg="#11111b", fg=TEXT_SEC,
+        tk.Label(banner,
+                 text="Developed by Rohan Sakhare",
+                 bg="#11111b", fg=self.TXT2,
                  font=("Consolas", 10)).pack(side="left", padx=4)
+        self.dot = tk.Label(banner, text="●  STOPPED",
+                            bg="#11111b", fg=self.RED,
+                            font=("Consolas", 11, "bold"))
+        self.dot.pack(side="right", padx=20)
 
-        # status dot
-        self.status_dot = tk.Label(banner, text="●  STOPPED",
-                                   bg="#11111b", fg=RED,
-                                   font=("Consolas", 11, "bold"))
-        self.status_dot.pack(side="right", padx=20)
-
-        # ── SERVER CONTROL BAR ──
-        ctrl = tk.Frame(self.root, bg=PANEL_BG, height=54)
-        ctrl.pack(fill="x", side="top")
+        # Control bar
+        ctrl = tk.Frame(self.root, bg=self.PANEL, height=54)
+        ctrl.pack(fill="x")
         ctrl.pack_propagate(False)
+        self._build_ctrl_bar(ctrl)
 
-        tk.Label(ctrl, text="Listen IP:", bg=PANEL_BG, fg=TEXT_SEC,
-                 font=("Consolas", 10)).pack(side="left", padx=(16, 4), pady=14)
-        self.ip_var = tk.StringVar(value="0.0.0.0")
-        ip_entry = tk.Entry(ctrl, textvariable=self.ip_var, width=15,
-                            bg=CARD_BG, fg=TEXT_PRI, insertbackground=TEXT_PRI,
-                            relief="flat", font=("Consolas", 11), bd=0)
-        ip_entry.pack(side="left", padx=4)
+        # Main paned area
+        pane = tk.PanedWindow(self.root, orient="horizontal",
+                              bg=self.BG, sashwidth=5, sashrelief="flat")
+        pane.pack(fill="both", expand=True)
 
-        tk.Label(ctrl, text="Port:", bg=PANEL_BG, fg=TEXT_SEC,
-                 font=("Consolas", 10)).pack(side="left", padx=(12, 4))
-        self.port_var = tk.StringVar(value="1234")
-        port_entry = tk.Entry(ctrl, textvariable=self.port_var, width=7,
-                              bg=CARD_BG, fg=TEXT_PRI, insertbackground=TEXT_PRI,
-                              relief="flat", font=("Consolas", 11), bd=0)
-        port_entry.pack(side="left", padx=4)
+        left = tk.Frame(pane, bg=self.BG)
+        pane.add(left, minsize=600)
 
-        self.start_btn = tk.Button(ctrl, text="▶  START",
-                                   command=self._start_server,
-                                   bg="#40a02b", fg="white",
-                                   font=("Consolas", 10, "bold"),
-                                   relief="flat", padx=14, cursor="hand2")
-        self.start_btn.pack(side="left", padx=14)
+        right = tk.Frame(pane, bg=self.BG)
+        pane.add(right, minsize=380)
 
-        self.stop_btn = tk.Button(ctrl, text="■  STOP",
-                                  command=self._stop_server, state="disabled",
-                                  bg=CARD_BG, fg=RED,
-                                  font=("Consolas", 10, "bold"),
-                                  relief="flat", padx=14, cursor="hand2")
-        self.stop_btn.pack(side="left", padx=2)
-
-        tk.Button(ctrl, text="🗑  Clear Log",
-                  command=self._clear_log,
-                  bg=CARD_BG, fg=TEXT_SEC,
-                  font=("Consolas", 10),
-                  relief="flat", padx=10, cursor="hand2").pack(side="right", padx=16)
-
-        tk.Button(ctrl, text="💾  Save Response",
-                  command=self._save_response_template,
-                  bg=CARD_BG, fg=ACCENT2,
-                  font=("Consolas", 10),
-                  relief="flat", padx=10, cursor="hand2").pack(side="right", padx=4)
-
-        tk.Button(ctrl, text="📂  Load Response",
-                  command=self._load_response_template,
-                  bg=CARD_BG, fg=ACCENT2,
-                  font=("Consolas", 10),
-                  relief="flat", padx=10, cursor="hand2").pack(side="right", padx=4)
-
-        # ── MAIN SPLIT ──
-        main = tk.PanedWindow(self.root, orient="horizontal",
-                              bg=DARK_BG, sashwidth=5, sashrelief="flat")
-        main.pack(fill="both", expand=True)
-
-        # LEFT: Notebook for request view + response editor
-        left_frame = tk.Frame(main, bg=DARK_BG)
-        main.add(left_frame, minsize=560)
-
-        nb = ttk.Notebook(left_frame)
+        # Notebook (left)
+        nb = ttk.Notebook(left)
         nb.pack(fill="both", expand=True, padx=6, pady=6)
 
-        # Tab 1: Last Request
-        req_frame = tk.Frame(nb, bg=DARK_BG)
-        nb.add(req_frame, text="  📥 Incoming Request  ")
-        self._build_request_tab(req_frame)
+        t0 = tk.Frame(nb, bg=self.BG)
+        nb.add(t0, text="  📥 Incoming Request  ")
+        self._build_request_tab(t0)
 
-        # Tab 2: ISO 124 Response
-        tab124 = tk.Frame(nb, bg=DARK_BG)
-        nb.add(tab124, text="  ISO 124 (Header)  ")
-        self._build_response_tab(tab124, "ISO 124 — Response Header", DEFAULT_RESPONSE_ISO124,
-                                 self.resp_vars_124, self.resp_iso124)
+        t1 = tk.Frame(nb, bg=self.BG)
+        nb.add(t1, text="  ISO 124 (Header)  ")
+        self._build_editor_tab(
+            t1,
+            "ISO 124 — Response Header",
+            DEFAULT_ISO124,
+            self.svars124,
+            self.resp124,
+            {"appDataLength": 8, "extHeaderLength": 4,
+             "tranCode": 9, "sourceApplication": 10,
+             "destinationApplication": 10, "errorCode": 10,
+             "filler": 1, "externalHeaderData": 20},
+        )
 
-        # Tab 3: ISO 125 Response
-        tab125 = tk.Frame(nb, bg=DARK_BG)
-        nb.add(tab125, text="  ISO 125 (Scores)  ")
-        self._build_response_tab(tab125, "ISO 125 — Falcon Score Response", DEFAULT_RESPONSE_ISO125,
-                                 self.resp_vars_125, self.resp_iso125)
+        t2 = tk.Frame(nb, bg=self.BG)
+        nb.add(t2, text="  ISO 125 (Scores)  ")
+        self._build_editor_tab(
+            t2,
+            "ISO 125 — Falcon Score + Decision Response",
+            DEFAULT_ISO125,
+            self.svars125,
+            self.resp125,
+            {n: s for n, s in ISO125_FIELDS},
+        )
 
-        # Tab 4: ISO 126 Response
-        tab126 = tk.Frame(nb, bg=DARK_BG)
-        nb.add(tab126, text="  ISO 126 (Decisions)  ")
-        self._build_iso126_tab(tab126)
+        t3 = tk.Frame(nb, bg=self.BG)
+        nb.add(t3, text="  ISO 126 (Decision overflow)  ")
+        self._build_editor_tab(
+            t3,
+            "ISO 126 — Decision Code 9 + Decision 10 + Scoring Server ID",
+            DEFAULT_ISO126,
+            self.svars126,
+            self.resp126,
+            {n: s for n, s in ISO126_FIELDS},
+        )
 
-        # RIGHT: Log panel
-        right_frame = tk.Frame(main, bg=DARK_BG)
-        main.add(right_frame, minsize=380)
-        self._build_log_panel(right_frame)
+        # Log (right)
+        self._build_log_panel(right)
+
+    def _apply_styles(self):
+        s = ttk.Style()
+        s.theme_use("clam")
+        s.configure("TNotebook",     background=self.BG,   borderwidth=0)
+        s.configure("TNotebook.Tab", background=self.CARD, foreground=self.TXT2,
+                    padding=[14, 6], font=("Consolas", 10))
+        s.map("TNotebook.Tab",
+              background=[("selected", self.PANEL)],
+              foreground=[("selected", self.ACCENT)])
+        s.configure("TFrame",        background=self.BG)
+        s.configure("TScrollbar",    background=self.CARD,
+                    troughcolor=self.PANEL, arrowcolor=self.TXT2)
+
+    def _build_ctrl_bar(self, ctrl):
+        def lbl(text):
+            return tk.Label(ctrl, text=text, bg=self.PANEL, fg=self.TXT2,
+                            font=("Consolas", 10))
+
+        def ent(var, w):
+            return tk.Entry(ctrl, textvariable=var, width=w,
+                            bg=self.CARD, fg=self.TXT,
+                            insertbackground=self.TXT,
+                            relief="flat", font=("Consolas", 11), bd=2)
+
+        def btn(text, cmd, bg, fg, **kw):
+            return tk.Button(ctrl, text=text, command=cmd,
+                             bg=bg, fg=fg,
+                             font=("Consolas", 10, "bold"),
+                             relief="flat", padx=12,
+                             cursor="hand2", **kw)
+
+        lbl("Listen IP:").pack(side="left", padx=(16, 4), pady=14)
+        self.ip_var = tk.StringVar(value="127.0.0.1")
+        ent(self.ip_var, 15).pack(side="left", padx=4)
+
+        lbl("Port:").pack(side="left", padx=(10, 4))
+        self.port_var = tk.StringVar(value="8070")
+        ent(self.port_var, 7).pack(side="left", padx=4)
+
+        self.start_btn = btn("▶  START", self._start_server, "#40a02b", "white")
+        self.start_btn.pack(side="left", padx=12)
+
+        self.stop_btn = btn("■  STOP", self._stop_server,
+                            self.CARD, self.RED, state="disabled")
+        self.stop_btn.pack(side="left", padx=2)
+
+        btn("🗑  Clear Log",     self._clear_log,      self.CARD, self.TXT2
+            ).pack(side="right", padx=14)
+        btn("💾  Save Response", self._save_template,  self.CARD, self.ACCENT2
+            ).pack(side="right", padx=4)
+        btn("📂  Load Response", self._load_template,  self.CARD, self.ACCENT2
+            ).pack(side="right", padx=4)
+
+    # ── Request viewer tab ────────────────────────────────────────────────────
 
     def _build_request_tab(self, parent):
-        C = self._colors
-        tk.Label(parent, text="Last received request — parsed fields",
-                 bg=C["DARK_BG"], fg=C["TEXT_SEC"],
-                 font=("Consolas", 9)).pack(anchor="w", padx=8, pady=(6, 2))
+        top = tk.Frame(parent, bg=self.BG)
+        top.pack(fill="x", padx=8, pady=(6, 2))
+        tk.Label(top,
+                 text="Last received request — parsed fields",
+                 bg=self.BG, fg=self.TXT2,
+                 font=("Consolas", 9)).pack(side="left")
+        tk.Button(top, text="🗑  Clear Request",
+                  command=self._clear_request,
+                  bg=self.CARD, fg=self.RED,
+                  font=("Consolas", 9), relief="flat",
+                  padx=8, cursor="hand2").pack(side="right")
 
         self.req_text = scrolledtext.ScrolledText(
-            parent, bg=C["PANEL_BG"], fg=C["TEXT_PRI"],
+            parent, bg=self.PANEL, fg=self.TXT,
             font=("Consolas", 10), relief="flat",
-            selectbackground=C["ACCENT"], selectforeground="#11111b",
-            insertbackground=C["TEXT_PRI"], state="disabled")
-        self.req_text.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+            selectbackground=self.ACCENT,
+            selectforeground="#11111b",
+            insertbackground=self.TXT,
+            state="disabled")
+        self.req_text.pack(fill="both", expand=True, padx=6, pady=(2, 6))
 
-        # Tag colours for request display
-        self.req_text.tag_configure("section",  foreground=C["ACCENT"],  font=("Consolas", 10, "bold"))
-        self.req_text.tag_configure("field",    foreground=C["ACCENT2"])
-        self.req_text.tag_configure("value",    foreground=C["TEXT_PRI"])
-        self.req_text.tag_configure("raw",      foreground=C["YELLOW"])
-        self.req_text.tag_configure("ts",       foreground=C["GREEN"])
+        for tag, fg, bold in [
+            ("sec", self.ACCENT,  True),
+            ("fld", self.ACCENT2, False),
+            ("val", self.TXT,     False),
+            ("raw", self.YELLOW,  False),
+            ("ts",  self.TXT2,    False),
+            ("sep", self.BORDER,  False),
+            ("err", self.RED,     False),
+        ]:
+            font_spec = ("Consolas", 10, "bold") if bold else ("Consolas", 10)
+            self.req_text.tag_configure(tag, foreground=fg, font=font_spec)
 
-    def _build_response_tab(self, parent, title, defaults, var_dict, store_dict):
-        C = self._colors
+    def _clear_request(self):
+        self.req_text.config(state="normal")
+        self.req_text.delete("1.0", "end")
+        self.req_text.config(state="disabled")
+
+    # ── Generic editor tab ────────────────────────────────────────────────────
+
+    def _build_editor_tab(self, parent, title: str, defaults: dict,
+                          var_dict: dict, store_dict: dict, size_map: dict):
         tk.Label(parent, text=title,
-                 bg=C["DARK_BG"], fg=C["ACCENT"],
-                 font=("Consolas", 10, "bold")).pack(anchor="w", padx=8, pady=(6, 2))
-        tk.Label(parent, text="All fields are fixed-length. Edit values below — simulator pads/trims automatically.",
-                 bg=C["DARK_BG"], fg=C["TEXT_SEC"],
-                 font=("Consolas", 9)).pack(anchor="w", padx=8)
+                 bg=self.BG, fg=self.ACCENT,
+                 font=("Consolas", 10, "bold")).pack(anchor="w", padx=8, pady=(6, 1))
+        tk.Label(parent,
+                 text="Fields are fixed-length — values padded/trimmed to exact size on send.",
+                 bg=self.BG, fg=self.TXT2,
+                 font=("Consolas", 9)).pack(anchor="w", padx=8, pady=(0, 4))
 
-        canvas = tk.Canvas(parent, bg=C["DARK_BG"], highlightthickness=0)
+        canvas = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
         sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=sb.set)
-
         sb.pack(side="right", fill="y")
-        canvas.pack(fill="both", expand=True, padx=6, pady=4)
+        canvas.pack(fill="both", expand=True, padx=6, pady=2)
 
-        inner = tk.Frame(canvas, bg=C["DARK_BG"])
-        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner = tk.Frame(canvas, bg=self.BG)
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
 
-        def on_configure(e):
+        def _on_inner(e):
             canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfig(win, width=canvas.winfo_width())
+            canvas.itemconfig(win_id, width=canvas.winfo_width())
 
-        inner.bind("<Configure>", on_configure)
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
-        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(-1*(e.delta//120), "units"))
+        inner.bind("<Configure>", _on_inner)
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfig(win_id, width=e.width))
+        for ev, delta in [("<MouseWheel>", None),
+                          ("<Button-4>", -1), ("<Button-5>", 1)]:
+            if delta is None:
+                canvas.bind(ev, lambda e: canvas.yview_scroll(
+                    -1 * (e.delta // 120), "units"))
+            else:
+                canvas.bind(ev, lambda e, d=delta: canvas.yview_scroll(d, "units"))
 
-        # Column headers
-        hdr_row = tk.Frame(inner, bg=C["CARD_BG"])
-        hdr_row.pack(fill="x", padx=4, pady=(4, 0))
-        for txt, w in [("Field Name", 28), ("Size", 5), ("Value", 40)]:
-            tk.Label(hdr_row, text=txt, bg=C["CARD_BG"], fg=C["ACCENT"],
-                     font=("Consolas", 9, "bold"), width=w, anchor="w").pack(side="left", padx=4)
+        # Column header
+        hdr = tk.Frame(inner, bg=self.CARD)
+        hdr.pack(fill="x", padx=2, pady=(2, 1))
+        for lbl_text, w in [("Field Name", 36), ("Size", 6),
+                             ("Value (editable)", 0)]:
+            tk.Label(hdr, text=lbl_text, bg=self.CARD, fg=self.ACCENT,
+                     font=("Consolas", 9, "bold"),
+                     width=w, anchor="w").pack(side="left", padx=6, pady=3)
 
-        for name, val in defaults.items():
-            row = tk.Frame(inner, bg=C["PANEL_BG"])
-            row.pack(fill="x", padx=4, pady=1)
+        for name, default_val in defaults.items():
+            sz = size_map.get(name, len(str(default_val)))
+            row = tk.Frame(inner, bg=self.PANEL)
+            row.pack(fill="x", padx=2, pady=1)
 
-            # Find size hint
-            size_hint = ""
-            for fname, fsize in (RESPONSE_HEADER_FIELDS + DBTRANS25_RESPONSE_FIELDS):
-                if fname == name:
-                    size_hint = str(fsize)
-                    break
-            if not size_hint:
-                size_hint = str(len(str(val)))
+            tk.Label(row, text=name, bg=self.PANEL, fg=self.ACCENT2,
+                     font=("Consolas", 9), width=36,
+                     anchor="w").pack(side="left", padx=6)
+            tk.Label(row, text=str(sz), bg=self.PANEL, fg=self.TXT2,
+                     font=("Consolas", 9), width=6,
+                     anchor="w").pack(side="left", padx=2)
 
-            tk.Label(row, text=name, bg=C["PANEL_BG"], fg=C["ACCENT2"],
-                     font=("Consolas", 9), width=28, anchor="w").pack(side="left", padx=4)
-            tk.Label(row, text=size_hint, bg=C["PANEL_BG"], fg=C["TEXT_SEC"],
-                     font=("Consolas", 9), width=5, anchor="w").pack(side="left", padx=2)
-
-            var = tk.StringVar(value=str(val))
+            var = tk.StringVar(value=str(default_val))
             var_dict[name] = var
-            ent = tk.Entry(row, textvariable=var, bg=C["CARD_BG"], fg=C["TEXT_PRI"],
-                           insertbackground=C["TEXT_PRI"], relief="flat",
-                           font=("Consolas", 9), width=48)
-            ent.pack(side="left", padx=4, pady=2, fill="x", expand=True)
+            tk.Entry(row, textvariable=var,
+                     bg=self.CARD, fg=self.TXT,
+                     insertbackground=self.TXT, relief="flat",
+                     font=("Consolas", 9), width=56
+                     ).pack(side="left", padx=4, pady=2, fill="x", expand=True)
 
-            var.trace_add("write", lambda *a, n=name, v=var, d=store_dict: d.update({n: v.get()}))
+            var.trace_add("write",
+                          lambda *a, k=name, v=var, d=store_dict:
+                              d.update({k: v.get()}))
 
-    def _build_iso126_tab(self, parent):
-        C = self._colors
-        tk.Label(parent, text="ISO 126 — Overflow decisions + scoring server ID",
-                 bg=C["DARK_BG"], fg=C["ACCENT"],
-                 font=("Consolas", 10, "bold")).pack(anchor="w", padx=8, pady=(6, 2))
-        tk.Label(parent, text="Fixed 100-byte overflow block.",
-                 bg=C["DARK_BG"], fg=C["TEXT_SEC"],
-                 font=("Consolas", 9)).pack(anchor="w", padx=8)
-
-        fields_126 = [
-            ("decisionType10",  "Decision Type 10 (32)",  32),
-            ("decisionCode10",  "Decision Code 10 (32)",  32),
-            ("scoringServerID", "Scoring Server ID (4)",    4),
-            ("padding",         "Padding (32)",            32),
-        ]
-
-        inner = tk.Frame(parent, bg=C["DARK_BG"])
-        inner.pack(fill="both", expand=True, padx=8, pady=8)
-
-        for key, label, size in fields_126:
-            row = tk.Frame(inner, bg=C["PANEL_BG"])
-            row.pack(fill="x", pady=2)
-            tk.Label(row, text=label, bg=C["PANEL_BG"], fg=C["ACCENT2"],
-                     font=("Consolas", 9), width=32, anchor="w").pack(side="left", padx=6)
-            var = tk.StringVar(value=self.resp_iso126.get(key, " "*size))
-            self.resp_vars_126[key] = var
-            ent = tk.Entry(row, textvariable=var, bg=C["CARD_BG"], fg=C["TEXT_PRI"],
-                           insertbackground=C["TEXT_PRI"], relief="flat",
-                           font=("Consolas", 9), width=50)
-            ent.pack(side="left", padx=4, pady=3)
-            var.trace_add("write", lambda *a, k=key, v=var: self.resp_iso126.update({k: v.get()}))
+    # ── Log panel ─────────────────────────────────────────────────────────────
 
     def _build_log_panel(self, parent):
-        C = self._colors
         tk.Label(parent, text="📋  Activity Log",
-                 bg=C["DARK_BG"], fg=C["ACCENT"],
+                 bg=self.BG, fg=self.ACCENT,
                  font=("Consolas", 11, "bold")).pack(anchor="w", padx=8, pady=(8, 2))
 
         self.log_text = scrolledtext.ScrolledText(
-            parent, bg=C["PANEL_BG"], fg=C["TEXT_PRI"],
+            parent, bg=self.PANEL, fg=self.TXT,
             font=("Consolas", 10), relief="flat",
-            selectbackground=C["ACCENT"], selectforeground="#11111b",
-            insertbackground=C["TEXT_PRI"], state="disabled", wrap="word")
+            selectbackground=self.ACCENT,
+            selectforeground="#11111b",
+            insertbackground=self.TXT,
+            state="disabled", wrap="word")
         self.log_text.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
-        self.log_text.tag_configure("ts",      foreground=C["TEXT_SEC"])
-        self.log_text.tag_configure("info",    foreground=C["ACCENT2"])
-        self.log_text.tag_configure("success", foreground=C["GREEN"])
-        self.log_text.tag_configure("error",   foreground=C["RED"])
-        self.log_text.tag_configure("warn",    foreground=C["YELLOW"])
-        self.log_text.tag_configure("raw",     foreground="#fab387", font=("Consolas", 9))
-        self.log_text.tag_configure("sep",     foreground="#45475a")
+        for tag, fg in [("ts",      self.TXT2),
+                        ("info",    self.ACCENT2),
+                        ("success", self.GREEN),
+                        ("error",   self.RED),
+                        ("warn",    self.YELLOW),
+                        ("raw",     self.ORANGE),
+                        ("sep",     self.BORDER)]:
+            self.log_text.tag_configure(tag, foreground=fg)
 
-    # ─── SERVER LOGIC ───────────────────────────────────────────────────────
+    # =========================================================================
+    # SERVER
+    # =========================================================================
 
     def _start_server(self):
-        ip   = self.ip_var.get().strip()
+        ip       = self.ip_var.get().strip()
         port_str = self.port_var.get().strip()
+
         try:
             port = int(port_str)
-            if not (1 <= port <= 65535):
-                raise ValueError
-        except ValueError:
-            messagebox.showerror("Invalid Port", f"Port must be a number 1–65535. Got: '{port_str}'")
+            assert 1 <= port <= 65535
+        except Exception:
+            messagebox.showerror("Invalid Port",
+                                 f"Port must be 1–65535.  Got: '{port_str}'")
             return
 
         if self.running:
@@ -782,42 +774,52 @@ class FalconSimulator:
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Bind ONLY to the exact IP and port entered by the user
             self.server_socket.bind((ip, port))
             self.server_socket.listen(1)
-            self.running = True
         except Exception as ex:
             messagebox.showerror("Bind Error", str(ex))
-            self._log(f"Failed to bind: {ex}", "error")
+            self._log(f"Bind failed on {ip}:{port} — {ex}", "error")
+            try:
+                self.server_socket.close()
+            except Exception:
+                pass
+            self.server_socket = None
             return
 
-        self.server_thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self.running     = True
+        self._bound_ip   = ip
+        self._bound_port = port
+
+        self.server_thread = threading.Thread(
+            target=self._accept_loop, daemon=True)
         self.server_thread.start()
 
-        self._log(f"Server started on {ip}:{port}", "success")
-        self.status_dot.config(text=f"●  LISTENING  {ip}:{port}",
-                               fg=self._colors["GREEN"])
+        self._log(f"Server started — listening on {ip}:{port}", "success")
+        self._set_dot(f"●  LISTENING  {ip}:{port}", self.GREEN)
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
 
     def _stop_server(self):
         self.running = False
-        if self.client_conn:
-            try:
-                self.client_conn.close()
-            except:
-                pass
-            self.client_conn = None
-        if self.server_socket:
-            try:
-                self.server_socket.close()
-            except:
-                pass
-            self.server_socket = None
+        for obj in (self.client_conn, self.server_socket):
+            if obj:
+                try:
+                    obj.close()
+                except Exception:
+                    pass
+        self.client_conn  = None
+        self.server_socket = None
 
         self._log("Server stopped.", "warn")
-        self.status_dot.config(text="●  STOPPED", fg=self._colors["RED"])
+        self._set_dot("●  STOPPED", self.RED)
         self.start_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
+
+    def _set_dot(self, text: str, colour: str):
+        self.root.after(0, lambda: self.dot.config(text=text, fg=colour))
+
+    # ── Accept loop ───────────────────────────────────────────────────────────
 
     def _accept_loop(self):
         self._log("Waiting for connection…", "info")
@@ -827,177 +829,213 @@ class FalconSimulator:
                 conn, addr = self.server_socket.accept()
             except socket.timeout:
                 continue
+            except OSError:
+                break
             except Exception as ex:
                 if self.running:
                     self._log(f"Accept error: {ex}", "error")
                 break
 
+            cip, cport = addr
+            self._log(f"Client connected: {cip}:{cport}", "success")
+            self._set_dot(f"●  CONNECTED  {cip}:{cport}", self.ACCENT)
             self.client_conn = conn
-            self.client_addr = addr
-            self._log(f"Client connected: {addr[0]}:{addr[1]}", "success")
-            self.root.after(0, lambda a=addr: self.status_dot.config(
-                text=f"●  CONNECTED  {a[0]}:{a[1]}",
-                fg=self._colors["ACCENT"]))
-            self._handle_client(conn, addr)
-            self._log(f"Client disconnected: {addr[0]}:{addr[1]}", "warn")
-            self.root.after(0, lambda: self.status_dot.config(
-                text=f"●  LISTENING  {self.ip_var.get()}:{self.port_var.get()}",
-                fg=self._colors["GREEN"]))
 
-    def _handle_client(self, conn, addr):
-        buffer = b""
+            self._handle_client(conn, addr)
+
+            self._log(f"Client disconnected: {cip}:{cport}", "warn")
+            self.client_conn = None
+            self._set_dot(
+                f"●  LISTENING  {self._bound_ip}:{self._bound_port}",
+                self.GREEN)
+
+    # ── Handle one client ─────────────────────────────────────────────────────
+
+    def _handle_client(self, conn: socket.socket, addr):
+        buf = b""
         conn.settimeout(120.0)
         try:
             while self.running:
                 try:
-                    data = conn.recv(4096)
+                    chunk = conn.recv(4096)
                 except socket.timeout:
                     continue
                 except Exception as ex:
                     self._log(f"Recv error: {ex}", "error")
                     break
 
-                if not data:
+                if not chunk:
                     break
 
-                buffer += data
-                # Try to decode and process
+                buf += chunk
+
                 try:
-                    raw_str = buffer.decode("ascii", errors="replace")
-                except:
-                    raw_str = buffer.decode("latin-1", errors="replace")
+                    raw = buf.decode("ascii", errors="replace")
+                except Exception:
+                    raw = buf.decode("latin-1", errors="replace")
 
-                self._log("─" * 60, "sep")
-                self._log(f"Received {len(data)} bytes from {addr[0]}:{addr[1]}", "info")
-                self._log(f"RAW ↓\n{raw_str}", "raw")
+                self._log("─" * 55, "sep")
+                self._log(
+                    f"Received {len(chunk)} bytes from {addr[0]}:{addr[1]}",
+                    "info")
+                self._log(f"RAW IN ↓\n{raw}", "raw")
 
-                # Parse and display request
-                parsed = parse_incoming_message(raw_str)
-                self.root.after(0, lambda p=parsed, r=raw_str: self._display_request(p, r))
+                hdr_d, body_d = self._parse_request(raw)
+                self.root.after(0,
+                    lambda h=hdr_d, b=body_d, r=raw:
+                        self._display_request(h, b, r))
 
-                # Build and send response
-                response = self._build_response(parsed)
+                resp = self._build_response()
                 try:
-                    conn.sendall(response.encode("ascii"))
-                    self._log(f"Response sent ({len(response)} bytes)", "success")
-                    self._log(f"RAW RESPONSE ↓\n{response}", "raw")
+                    conn.sendall(resp.encode("ascii"))
+                    self._log(
+                        f"Response sent ({len(resp)} bytes)", "success")
+                    self._log(f"RAW OUT ↓\n{resp}", "raw")
                 except Exception as ex:
                     self._log(f"Send error: {ex}", "error")
 
-                buffer = b""
+                buf = b""
+
         except Exception as ex:
             self._log(f"Client handler error: {ex}", "error")
         finally:
             try:
                 conn.close()
-            except:
+            except Exception:
                 pass
-            self.client_conn = None
 
-    # ─── RESPONSE BUILDER ───────────────────────────────────────────────────
+    # =========================================================================
+    # PARSE REQUEST
+    # =========================================================================
 
-    def _build_response(self, parsed_req: dict) -> str:
-        """Build the full response string = ISO124 + ISO125 + ISO126."""
+    def _parse_request(self, raw: str):
+        hdr, body = {}, {}
+        if len(raw) < INBOUND_HEADER_SIZE:
+            hdr["_error"] = (
+                f"Message too short for header "
+                f"({len(raw)} < {INBOUND_HEADER_SIZE})")
+            return hdr, body
+        hdr  = parse_fields(raw, INBOUND_HEADER_FIELDS)
+        body = parse_fields(raw[INBOUND_HEADER_SIZE:], DBTRANS25_REQUEST_FIELDS)
+        return hdr, body
 
-        # Collect current UI values
-        h = {k: v.get() for k, v in self.resp_vars_124.items()} if self.resp_vars_124 else dict(self.resp_iso124)
-        s = {k: v.get() for k, v in self.resp_vars_125.items()} if self.resp_vars_125 else dict(self.resp_iso125)
-        x = {k: v.get() for k, v in self.resp_vars_126.items()} if self.resp_vars_126 else dict(self.resp_iso126)
+    # =========================================================================
+    # BUILD RESPONSE
+    # =========================================================================
 
-        # Build ISO 125 (app data)
-        iso125 = self._build_block(s, DBTRANS25_RESPONSE_FIELDS)
+    def _build_response(self) -> str:
+        """
+        Assemble the complete outbound message:
 
-        # Build ISO 126 (overflow)
+          ISO 124  (72 bytes)
+            appDataLength      [8]   ← auto-computed = len(ISO125+ISO126)
+            extHeaderLength    [4]   "0020"
+            tranCode           [9]   "200000102"
+            sourceApplication  [10]  "PMAX      "
+            destinationApp     [10]  "IDFCTANGO "
+            errorCode          [10]  "0000000000"
+            filler             [1]   " "
+            externalHeaderData [20]  "DBTRAN25xxxxxxxxxx  "
+
+          ISO 125  (971 bytes)  — all fields from ISO125_FIELDS
+          ISO 126  (100 bytes)  — decisionCode9 + decisionType10 +
+                                  decisionCode10 + scoringServerID
+        """
+
+        # ── Read current StringVar values ──────────────────────────────────
+        s125 = ({k: v.get() for k, v in self.svars125.items()}
+                if self.svars125 else dict(self.resp125))
+        s126 = ({k: v.get() for k, v in self.svars126.items()}
+                if self.svars126 else dict(self.resp126))
+        s124 = ({k: v.get() for k, v in self.svars124.items()}
+                if self.svars124 else dict(self.resp124))
+
+        # ── Build ISO 125 ──────────────────────────────────────────────────
+        iso125 = ""
+        for fname, fsize in ISO125_FIELDS:
+            iso125 += fw(s125.get(fname, ""), fsize)
+
+        # ── Build ISO 126 ──────────────────────────────────────────────────
         iso126 = ""
-        for key in ["decisionType10", "decisionCode10", "scoringServerID", "padding"]:
-            sizes = {"decisionType10": 32, "decisionCode10": 32, "scoringServerID": 4, "padding": 32}
-            val = x.get(key, "")
-            iso126 += self._pad(val, sizes[key])
+        for fname, fsize in ISO126_FIELDS:
+            iso126 += fw(s126.get(fname, ""), fsize)
 
-        app_data = iso125 + iso126
-        app_data_len = len(app_data)
+        app_data = iso125 + iso126          # this is what appDataLength counts
+        app_len  = len(app_data)            # auto-computed
 
-        # Update appDataLength in header
-        h["appDataLength"] = str(app_data_len).zfill(8)
-
-        # Build ISO 124 header
-        ext_hdr = h.get("externalHeaderData", "DBTRAN251718532397  ")
-        ext_hdr_len = len(ext_hdr.rstrip())
-        ext_hdr_padded = self._pad(ext_hdr, 20)
-        h["externalHeaderData"] = ext_hdr_padded
-        h["extHeaderLength"] = str(20).zfill(4)
+        # ── Build ISO 124 ─────────────────────────────────────────────────
+        ext_hdr = fw(s124.get("externalHeaderData",
+                               "DBTRAN251718532397  "), 20)
 
         iso124 = (
-            self._pad(h.get("appDataLength", "00001069"),          8)  +
-            self._pad(h.get("extHeaderLength", "0020"),            4)  +
-            self._pad(h.get("tranCode", "200000102"),              9)  +
-            self._pad(h.get("sourceApplication", "PMAX      "),   10)  +
-            self._pad(h.get("destinationApplication","IDFCTANGO "),10)  +
-            self._pad(h.get("errorCode", "0000000000"),           10)  +
-            self._pad(h.get("filler", " "),                        1)  +
-            ext_hdr_padded
+            fw(str(app_len).zfill(8),                               8) +  # appDataLength
+            fw(s124.get("extHeaderLength",  "0020"),                4) +  # extHeaderLength
+            fw(s124.get("tranCode",         "200000102"),           9) +  # tranCode
+            fw(s124.get("sourceApplication","PMAX      "),         10) +  # sourceApplication
+            fw(s124.get("destinationApplication","IDFCTANGO "),    10) +  # destinationApplication
+            fw(s124.get("errorCode",        "0000000000"),         10) +  # errorCode
+            fw(s124.get("filler",           " "),                   1) +  # filler
+            ext_hdr                                                        # externalHeaderData (20)
         )
+        # total ISO124 = 8+4+9+10+10+10+1+20 = 72
 
         return iso124 + app_data
 
-    def _build_block(self, values: dict, field_defs: list) -> str:
-        msg = ""
-        for name, size in field_defs:
-            val = str(values.get(name, ""))
-            msg += self._pad(val, size)
-        return msg
+    # =========================================================================
+    # DISPLAY REQUEST
+    # =========================================================================
 
-    def _pad(self, val: str, size: int) -> str:
-        val = str(val)
-        if len(val) > size:
-            return val[:size]
-        return val.ljust(size)
-
-    # ─── REQUEST DISPLAY ────────────────────────────────────────────────────
-
-    def _display_request(self, parsed: dict, raw: str):
+    def _display_request(self, hdr: dict, body: dict, raw: str):
         self.req_text.config(state="normal")
         self.req_text.delete("1.0", "end")
 
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         self.req_text.insert("end", f"Received: {ts}\n", "ts")
-        self.req_text.insert("end", "─" * 70 + "\n", "section")
+        self.req_text.insert("end", "─" * 70 + "\n", "sep")
 
-        sections = parsed.get("_sections", {})
+        self.req_text.insert("end", "\n▸ HEADER  (ISO 124 incoming)\n", "sec")
+        for k, v in hdr.items():
+            if k.startswith("_"):
+                self.req_text.insert("end", f"  {v}\n", "err")
+                continue
+            disp = v.strip() if isinstance(v, str) else str(v)
+            self.req_text.insert("end", f"  {k:<44}", "fld")
+            self.req_text.insert("end", f"  [{disp}]\n",  "val")
 
-        for section_name, section_data in sections.items():
-            label = "HEADER (ISO 124)" if section_name == "header" else "REQUEST BODY (DBTrans25)"
-            self.req_text.insert("end", f"\n▸ {label}\n", "section")
-            for k, v in section_data.items():
-                disp_v = v.strip() if isinstance(v, str) else str(v)
-                self.req_text.insert("end", f"  {k:<40}", "field")
-                self.req_text.insert("end", f"  [{disp_v}]\n", "value")
+        if body:
+            self.req_text.insert("end", "\n▸ BODY  (DBTrans25 Request)\n", "sec")
+            for k, v in body.items():
+                disp = v.strip() if isinstance(v, str) else str(v)
+                self.req_text.insert("end", f"  {k:<44}", "fld")
+                self.req_text.insert("end", f"  [{disp}]\n", "val")
 
-        self.req_text.insert("end", "\n─ RAW ─\n", "section")
+        self.req_text.insert("end", "\n─ RAW ─\n", "sep")
         self.req_text.insert("end", raw + "\n", "raw")
         self.req_text.config(state="disabled")
-        self.req_text.see("end")
+        self.req_text.see("1.0")
 
-    # ─── LOG ────────────────────────────────────────────────────────────────
+    # =========================================================================
+    # LOG
+    # =========================================================================
 
-    def _log(self, message: str, level: str = "info"):
-        self.log_queue.put((message, level))
+    def _log(self, msg: str, level: str = "info"):
+        self.log_queue.put((msg, level))
 
-    def _poll_log_queue(self):
+    def _poll_log(self):
         try:
             while True:
                 msg, level = self.log_queue.get_nowait()
                 self._write_log(msg, level)
         except queue.Empty:
             pass
-        self.root.after(100, self._poll_log_queue)
+        self.root.after(100, self._poll_log)
 
-    def _write_log(self, message: str, level: str):
+    def _write_log(self, msg: str, level: str):
         self.log_text.config(state="normal")
         ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
         if level != "sep":
             self.log_text.insert("end", f"[{ts}] ", "ts")
-        self.log_text.insert("end", message + "\n", level)
+        self.log_text.insert("end", msg + "\n", level)
         self.log_text.config(state="disabled")
         self.log_text.see("end")
 
@@ -1006,28 +1044,35 @@ class FalconSimulator:
         self.log_text.delete("1.0", "end")
         self.log_text.config(state="disabled")
 
-    # ─── SAVE / LOAD RESPONSE TEMPLATE ──────────────────────────────────────
+    # =========================================================================
+    # SAVE / LOAD
+    # =========================================================================
 
-    def _save_response_template(self):
+    def _save_template(self):
         from tkinter.filedialog import asksaveasfilename
-        path = asksaveasfilename(defaultextension=".json",
-                                  filetypes=[("JSON", "*.json"), ("All", "*.*")],
-                                  title="Save Response Template")
+        path = asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+            title="Save Response Template")
         if not path:
             return
         data = {
-            "iso124": {k: v.get() for k, v in self.resp_vars_124.items()},
-            "iso125": {k: v.get() for k, v in self.resp_vars_125.items()},
-            "iso126": {k: v.get() for k, v in self.resp_vars_126.items()},
+            "iso124": {k: v.get() for k, v in self.svars124.items()},
+            "iso125": {k: v.get() for k, v in self.svars125.items()},
+            "iso126": {k: v.get() for k, v in self.svars126.items()},
         }
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
-        self._log(f"Response template saved: {path}", "success")
+        try:
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+            self._log(f"Template saved: {path}", "success")
+        except Exception as ex:
+            messagebox.showerror("Save Error", str(ex))
 
-    def _load_response_template(self):
+    def _load_template(self):
         from tkinter.filedialog import askopenfilename
-        path = askopenfilename(filetypes=[("JSON", "*.json"), ("All", "*.*")],
-                                title="Load Response Template")
+        path = askopenfilename(
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+            title="Load Response Template")
         if not path:
             return
         try:
@@ -1036,24 +1081,24 @@ class FalconSimulator:
         except Exception as ex:
             messagebox.showerror("Load Error", str(ex))
             return
-
-        for section, var_dict in [("iso124", self.resp_vars_124),
-                                   ("iso125", self.resp_vars_125),
-                                   ("iso126", self.resp_vars_126)]:
+        for section, var_dict in [("iso124", self.svars124),
+                                   ("iso125", self.svars125),
+                                   ("iso126", self.svars126)]:
             for k, v in data.get(section, {}).items():
                 if k in var_dict:
                     var_dict[k].set(v)
-        self._log(f"Response template loaded: {path}", "success")
+        self._log(f"Template loaded: {path}", "success")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 
 def main():
     root = tk.Tk()
-    app = FalconSimulator(root)
-    root.protocol("WM_DELETE_WINDOW", lambda: (app._stop_server(), root.destroy()))
+    app  = FalconSimulator(root)
+    root.protocol("WM_DELETE_WINDOW",
+                  lambda: (app._stop_server(), root.destroy()))
     root.mainloop()
 
 
