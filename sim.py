@@ -4,9 +4,12 @@ Euronet Falcon TCP Simulator
 Developed by Rohan Sakhare
 Internal Tool — IDFC First Bank / Euronet Integration
 
-KEY FIX: appDataLength is 9 bytes (not 8), matching C++ vcDBTrans25Header definition.
-         Response body is 1067 bytes (exact per vcDBTrans25Response field sizes).
-         externalHeaderData length is variable — read from extHeaderLength field.
+RESPONSE FIELD SIZES match vcDBTrans25Response from FalconPlugin.cpp exactly:
+  - error_code_2 = 2  (NOT 4 — unique exception in score block 2)
+  - All decisions (1-10) + scoring_server_id in one contiguous app-data block
+  - No ISO 126 split — everything is one flat response body of 1067 bytes
+  - extHeaderLength is auto-computed from actual externalHeaderData length
+  - appDataLength is auto-computed from actual app-data length
 """
 
 import socket
@@ -19,188 +22,213 @@ import queue
 import copy
 
 # =============================================================================
-# EXACT FIELD DEFINITIONS — Sourced directly from C++ FalconPlugin.cpp
+# INBOUND HEADER FIELDS (from vcDBTrans25Header in FalconPlugin.cpp)
+# Layout: {9,appDataLength}{4,extHeaderLength}{9,tranCode}{10,src}{10,dst}
+#         {10,errorCode}{1,filler}{variable,externalHeaderData}{17,RESERVED_01}
+# C++ reads: appDataLen=SubString(1,8), extHdrLen=SubString(9,4), tranCode=SubString(12,9) [1-based]
 # =============================================================================
+INBOUND_HEADER_FIELDS = [
+    ("appDataLength",          9),
+    ("extHeaderLength",        4),
+    ("tranCode",               9),
+    ("sourceApplication",     10),
+    ("destinationApplication",10),
+    ("errorCode",             10),
+    ("filler",                 1),
+    # externalHeaderData is variable (extHeaderLength chars) then RESERVED_01 (17)
+]
 
-# ── Inbound header (what we receive) ─────────────────────────────────────────
-# C++ vcDBTrans25Header:  9+4+9+10+10+10+1+variable+17 = 70 + extHdrLen bytes
-INBOUND_HEADER_FIXED = [
-    ("appDataLength",           9),   # ← 9, NOT 8!
-    ("extHeaderLength",         4),
+# =============================================================================
+# OUTBOUND RESPONSE FIELD DEFINITIONS
+# Exactly matches vcDBTrans25Response in FalconPlugin.cpp
+# CRITICAL: error_code_2 = 2 bytes (NOT 4 — this was the root cause bug)
+# ALL decisions 1-10 + scoring_server_id are in one flat body (no ISO125/126 split)
+# Total = 1067 bytes
+# =============================================================================
+RESPONSE_FIELDS = [
+    # ── version + count
+    ("response_record_version",  1),
+    ("score_count",              2),
+
+    # ── Score block 1  (22+4+4+4+4+4 = 42)
+    ("score_name_1",  22), ("error_code_1",   4), ("score_1",   4),
+    ("reason_1_1",     4), ("reason_1_2",     4), ("reason_1_3",4),
+
+    # ── Score block 2  (22+2+4+4+4+4 = 40)  ← error_code_2 is 2, NOT 4!
+    ("score_name_2",  22), ("error_code_2",   2), ("score_2",   4),
+    ("reason_2_1",     4), ("reason_2_2",     4), ("reason_2_3",4),
+
+    # ── Score blocks 3-8  (22+4+4+4+4+4 = 42 each)
+    ("score_name_3",  22), ("error_code_3",   4), ("score_3",   4),
+    ("reason_3_1",     4), ("reason_3_2",     4), ("reason_3_3",4),
+
+    ("score_name_4",  22), ("error_code_4",   4), ("score_4",   4),
+    ("reason_4_1",     4), ("reason_4_2",     4), ("reason_4_3",4),
+
+    ("score_name_5",  22), ("error_code_5",   4), ("score_5",   4),
+    ("reason_5_1",     4), ("reason_5_2",     4), ("reason_5_3",4),
+
+    ("score_name_6",  22), ("error_code_6",   4), ("score_6",   4),
+    ("reason_6_1",     4), ("reason_6_2",     4), ("reason_6_3",4),
+
+    ("score_name_7",  22), ("error_code_7",   4), ("score_7",   4),
+    ("reason_7_1",     4), ("reason_7_2",     4), ("reason_7_3",4),
+
+    ("score_name_8",  22), ("error_code_8",   4), ("score_8",   4),
+    ("reason_8_1",     4), ("reason_8_2",     4), ("reason_8_3",4),
+
+    # ── Segment IDs + fillers
+    ("segment_id_1",   8), ("segment_id_2",   8), ("segment_id_3", 8),
+    ("filler1_1",      2), ("filler1_2",      4), ("filler1_3",    2),
+    ("segment_id_4",   8), ("segment_id_5",   8), ("segment_id_6", 8),
+    ("segment_id_7",   8), ("filler2_1",      4), ("filler2_2",    4),
+    ("segment_id_8",   8), ("filler3",        4),
+
+    # ── Decision block (count + 10 type/code pairs = 2+640 = 642)
+    ("decision_count",  2),
+    ("decision_type_1", 32), ("decision_code_1",  32),
+    ("decision_type_2", 32), ("decision_code_2",  32),
+    ("decision_type_3", 32), ("decision_code_3",  32),
+    ("decision_type_4", 32), ("decision_code_4",  32),
+    ("decision_type_5", 32), ("decision_code_5",  32),
+    ("decision_type_6", 32), ("decision_code_6",  32),
+    ("decision_type_7", 32), ("decision_code_7",  32),
+    ("decision_type_8", 32), ("decision_code_8",  32),
+    ("decision_type_9", 32), ("decision_code_9",  32),
+    ("decision_type_10",32), ("decision_code_10", 32),
+
+    # ── Scoring server ID
+    ("scoring_server_id", 4),
+]
+# Total = 1+2 + 42 + 40 + 5*42 + 86 + 642 + 4 = 1067 bytes
+
+# Inbound DBTrans25 body fields (for request display only)
+DBTRANS25_REQUEST_FIELDS = [
+    ("workflow",                         16), ("recordType",                     8),
+    ("dataSpecificationVersion",          5), ("clientIdFromHeader",            16),
+    ("recordCreationDate",                8), ("recordCreationTime",             6),
+    ("recordCreationMilliseconds",        3), ("gmtOffset",                      6),
+    ("customerIdFromHeader",             20), ("customerAcctNumber",            40),
+    ("externalTransactionId",            32), ("pan",                           19),
+    ("authPostFlag",                      1), ("cardPostalCode",                 9),
+    ("cardCountryCode",                   3), ("openDate",                       8),
+    ("plasticIssueDate",                  8), ("plasticIssueType",               1),
+    ("acctExpireDate",                    8), ("cardExpireDate",                 8),
+    ("dailyMerchandiseLimit",            10), ("dailyCashLimit",                10),
+    ("customerGender",                    1), ("customerDateOfBirth",            8),
+    ("numberOfCards",                     3), ("incomeOrCashBack",              10),
+    ("cardType",                          1), ("cardUse",                        1),
+    ("transactionDate",                   8), ("transactionTime",                6),
+    ("transactionAmount",                13), ("transactionCurrencyCode",        3),
+    ("transactionCurrencyConversionRate",13), ("authDecisionCode",               1),
+    ("transactionType",                   1), ("mcc",                            4),
+    ("merchantPostalCode",                9), ("merchantCountryCode",            3),
+    ("pinVerifyCode",                     1), ("cvvVerifyCode",                  1),
+    ("posEntryMode",                      1), ("postDate",                       8),
+    ("authPostMiscIndicator",             1), ("mismatchIndicator",              1),
+    ("caseCreationIndicator",             1), ("userIndicator01",                1),
+    ("userIndicator02",                   1), ("userData01",                    10),
+    ("userData02",                       10), ("onUsMerchantId",                10),
+    ("merchantDataProvided",              1), ("cardholderDataProvided",         1),
+    ("externalScore1",                    4), ("externalScore2",                 4),
+    ("externalScore3",                    4), ("customerPresent",                1),
+    ("atmOwner",                          1), ("randomDigits",                   2),
+    ("portfolio",                        14), ("clientId",                      14),
+    ("acquirerBin",                       6), ("merchantName",                  40),
+    ("merchantCity",                     30), ("merchantState",                  3),
+    ("caseSuppressionIndicator",          1), ("userIndicator03",                5),
+    ("userIndicator04",                   5), ("userData03",                    15),
+    ("userData04",                       20), ("userData05",                    40),
+    ("realtimeRequest",                   1), ("padResponse",                    1),
+    ("padActionExpireDate",               8), ("cardMasterAcctNumber",          19),
+    ("cardAipStatic",                     1), ("cardAipDynamic",                 1),
+    ("RESERVED_01",                       1), ("cardAipVerify",                  1),
+    ("cardAipRisk",                       1), ("cardAipIssuerAuthentication",    1),
+    ("cardAipCombined",                   1), ("cardDailyLimitCode",             1),
+    ("availableBalance",                 13), ("availableDailyCashLimit",       13),
+    ("availableDailyMerchandiseLimit",   13), ("atmHostMcc",                     4),
+    ("atmProcessingCode",                 6), ("atmCameraPresent",               1),
+    ("cardPinType",                       1), ("cardMediaType",                  1),
+    ("cvv2Present",                       1), ("cvv2Response",                   1),
+    ("avsResponse",                       1), ("transactionCategory",            1),
+    ("acquirerId",                       12), ("acquirerCountry",                3),
+    ("terminalId",                       16), ("terminalType",                   1),
+    ("terminalEntryCapability",           1), ("posConditionCode",               2),
+    ("networkId",                         1), ("RESERVED_02",                    1),
+    ("authExpireDateVerify",              1), ("authSecondaryVerify",            1),
+    ("authBeneficiary",                   1), ("authResponseCode",               1),
+    ("authReversalReason",                1), ("authCardIssuer",                 1),
+    ("terminalVerificationResults",      10), ("cardVerificationResults",       10),
+    ("cryptogramValid",                   1), ("atcCard",                        5),
+    ("atcHost",                           5), ("RESERVED_03",                    2),
+    ("offlineLowerLimit",                 2), ("offlineUpperLimit",              2),
+    ("recurringAuthFrequency",            2), ("recurringAuthExpireDate",        8),
+    ("linkedAcctType",                    1), ("cardIncentive",                  1),
+    ("cardPinLength",                     2), ("cardPinSetDate",                 8),
+    ("processorAuthReasonCode",           5), ("standinAdvice",                  1),
+    ("merchantId",                       16), ("cardOrder",                      1),
+    ("cashbackAmount",                   13), ("userData06",                    13),
+    ("userData07",                       40), ("paymentInstrumentId",           30),
+    ("avsRequest",                        1), ("cvrOfflinePinVerificationPerformed",1),
+    ("cvrOfflinePinVerificationFailed",   1), ("cvrPinTryLimitExceeded",         1),
+    ("posUnattended",                     1), ("posOffPremises",                 1),
+    ("posCardCapture",                    1), ("posSecurity",                    1),
+    ("authId",                            6), ("userData08",                    10),
+    ("userData09",                       10), ("userIndicator05",                1),
+    ("userIndicator06",                   1), ("userIndicator07",                5),
+    ("userIndicator08",                   5), ("modelControl1",                  1),
+    ("modelControl2",                     1), ("modelControl3",                  1),
+    ("modelControl4",                     1), ("RESERVED_04",                    3),
+    ("segmentId1",                        6), ("segmentId2",                     6),
+    ("segmentId3",                        6), ("segmentId4",                     6),
+]
+
+# =============================================================================
+# OUTBOUND HEADER FIELDS (for editor — ISO 124 equivalent)
+# Layout: appDataLength(8) + extHeaderLength(4) + tranCode(9) + sourceApp(10)
+#         + destApp(10) + errorCode(10) + filler(1) + externalHeaderData(variable)
+# appDataLength and extHeaderLength are AUTO-COMPUTED — shown read-only
+# =============================================================================
+HEADER_FIELDS_EDITOR = [
+    ("appDataLength",           8),   # AUTO — equals len(app_data body)
+    ("extHeaderLength",         4),   # AUTO — equals len(externalHeaderData)
     ("tranCode",                9),
     ("sourceApplication",      10),
     ("destinationApplication", 10),
     ("errorCode",              10),
     ("filler",                  1),
-    # externalHeaderData length = int(extHeaderLength)  — parsed dynamically
-    # RESERVED_01              17
-]
-INBOUND_FIXED_BEFORE_EXT = sum(s for _, s in INBOUND_HEADER_FIXED)   # = 53
-INBOUND_RESERVED_AFTER  = 17
-
-# ── Response body fields — EXACT sizes from C++ vcDBTrans25Response ───────────
-# NOTE: error_code_2 is 2 bytes in C++ (typo in original — preserved faithfully)
-RESPONSE_BODY_FIELDS = [
-    ("response_record_version",  1),
-    ("score_count",              2),
-
-    ("score_name_1",  22), ("error_code_1",  4), ("score_1",  4),
-    ("reason_1_1",     4), ("reason_1_2",    4), ("reason_1_3", 4),
-
-    ("score_name_2",  22), ("error_code_2",  2), ("score_2",  4),  # error_code_2 = 2!
-    ("reason_2_1",     4), ("reason_2_2",    4), ("reason_2_3", 4),
-
-    ("score_name_3",  22), ("error_code_3",  4), ("score_3",  4),
-    ("reason_3_1",     4), ("reason_3_2",    4), ("reason_3_3", 4),
-
-    ("score_name_4",  22), ("error_code_4",  4), ("score_4",  4),
-    ("reason_4_1",     4), ("reason_4_2",    4), ("reason_4_3", 4),
-
-    ("score_name_5",  22), ("error_code_5",  4), ("score_5",  4),
-    ("reason_5_1",     4), ("reason_5_2",    4), ("reason_5_3", 4),
-
-    ("score_name_6",  22), ("error_code_6",  4), ("score_6",  4),
-    ("reason_6_1",     4), ("reason_6_2",    4), ("reason_6_3", 4),
-
-    ("score_name_7",  22), ("error_code_7",  4), ("score_7",  4),
-    ("reason_7_1",     4), ("reason_7_2",    4), ("reason_7_3", 4),
-
-    ("score_name_8",  22), ("error_code_8",  4), ("score_8",  4),
-    ("reason_8_1",     4), ("reason_8_2",    4), ("reason_8_3", 4),
-
-    ("segment_id_1",  8), ("segment_id_2",  8), ("segment_id_3", 8),
-    ("filler1_1",     2), ("filler1_2",     4), ("filler1_3",    2),
-    ("segment_id_4",  8), ("segment_id_5",  8), ("segment_id_6", 8),
-    ("segment_id_7",  8), ("filler2_1",     4), ("filler2_2",    4),
-    ("segment_id_8",  8), ("filler3",       4),
-
-    ("decision_count", 2),
-
-    ("decision_type_1",  32), ("decision_code_1",  32),
-    ("decision_type_2",  32), ("decision_code_2",  32),
-    ("decision_type_3",  32), ("decision_code_3",  32),
-    ("decision_type_4",  32), ("decision_code_4",  32),
-    ("decision_type_5",  32), ("decision_code_5",  32),
-    ("decision_type_6",  32), ("decision_code_6",  32),
-    ("decision_type_7",  32), ("decision_code_7",  32),
-    ("decision_type_8",  32), ("decision_code_8",  32),
-    ("decision_type_9",  32), ("decision_code_9",  32),
-    ("decision_type_10", 32), ("decision_code_10", 32),
-
-    ("scoring_server_id", 4),
-]
-RESPONSE_BODY_SIZE = sum(s for _, s in RESPONSE_BODY_FIELDS)  # = 1067
-
-# ── Inbound DBTrans25 body fields (for display only) ─────────────────────────
-DBTRANS25_REQUEST_FIELDS = [
-    ("workflow",                        16), ("recordType",                    8),
-    ("dataSpecificationVersion",         5), ("clientIdFromHeader",           16),
-    ("recordCreationDate",               8), ("recordCreationTime",            6),
-    ("recordCreationMilliseconds",       3), ("gmtOffset",                     6),
-    ("customerIdFromHeader",            20), ("customerAcctNumber",           40),
-    ("externalTransactionId",           32), ("pan",                          19),
-    ("authPostFlag",                     1), ("cardPostalCode",                9),
-    ("cardCountryCode",                  3), ("openDate",                      8),
-    ("plasticIssueDate",                 8), ("plasticIssueType",              1),
-    ("acctExpireDate",                   8), ("cardExpireDate",                8),
-    ("dailyMerchandiseLimit",           10), ("dailyCashLimit",               10),
-    ("customerGender",                   1), ("customerDateOfBirth",           8),
-    ("numberOfCards",                    3), ("incomeOrCashBack",             10),
-    ("cardType",                         1), ("cardUse",                       1),
-    ("transactionDate",                  8), ("transactionTime",               6),
-    ("transactionAmount",               13), ("transactionCurrencyCode",       3),
-    ("transactionCurrencyConversionRate",13),("authDecisionCode",              1),
-    ("transactionType",                  1), ("mcc",                           4),
-    ("merchantPostalCode",               9), ("merchantCountryCode",           3),
-    ("pinVerifyCode",                    1), ("cvvVerifyCode",                 1),
-    ("posEntryMode",                     1), ("postDate",                      8),
-    ("authPostMiscIndicator",            1), ("mismatchIndicator",             1),
-    ("caseCreationIndicator",            1), ("userIndicator01",               1),
-    ("userIndicator02",                  1), ("userData01",                   10),
-    ("userData02",                      10), ("onUsMerchantId",               10),
-    ("merchantDataProvided",             1), ("cardholderDataProvided",        1),
-    ("externalScore1",                   4), ("externalScore2",                4),
-    ("externalScore3",                   4), ("customerPresent",               1),
-    ("atmOwner",                         1), ("randomDigits",                  2),
-    ("portfolio",                       14), ("clientId",                     14),
-    ("acquirerBin",                      6), ("merchantName",                 40),
-    ("merchantCity",                    30), ("merchantState",                 3),
-    ("caseSuppressionIndicator",         1), ("userIndicator03",               5),
-    ("userIndicator04",                  5), ("userData03",                   15),
-    ("userData04",                      20), ("userData05",                   40),
-    ("realtimeRequest",                  1), ("padResponse",                   1),
-    ("padActionExpireDate",              8), ("cardMasterAcctNumber",         19),
-    ("cardAipStatic",                    1), ("cardAipDynamic",                1),
-    ("RESERVED_01",                      1), ("cardAipVerify",                 1),
-    ("cardAipRisk",                      1), ("cardAipIssuerAuthentication",   1),
-    ("cardAipCombined",                  1), ("cardDailyLimitCode",            1),
-    ("availableBalance",                13), ("availableDailyCashLimit",      13),
-    ("availableDailyMerchandiseLimit",  13), ("atmHostMcc",                    4),
-    ("atmProcessingCode",                6), ("atmCameraPresent",              1),
-    ("cardPinType",                      1), ("cardMediaType",                 1),
-    ("cvv2Present",                      1), ("cvv2Response",                  1),
-    ("avsResponse",                      1), ("transactionCategory",           1),
-    ("acquirerId",                      12), ("acquirerCountry",               3),
-    ("terminalId",                      16), ("terminalType",                  1),
-    ("terminalEntryCapability",          1), ("posConditionCode",              2),
-    ("networkId",                        1), ("RESERVED_02",                   1),
-    ("authExpireDateVerify",             1), ("authSecondaryVerify",           1),
-    ("authBeneficiary",                  1), ("authResponseCode",              1),
-    ("authReversalReason",               1), ("authCardIssuer",                1),
-    ("terminalVerificationResults",     10), ("cardVerificationResults",      10),
-    ("cryptogramValid",                  1), ("atcCard",                       5),
-    ("atcHost",                          5), ("RESERVED_03",                   2),
-    ("offlineLowerLimit",                2), ("offlineUpperLimit",             2),
-    ("recurringAuthFrequency",           2), ("recurringAuthExpireDate",       8),
-    ("linkedAcctType",                   1), ("cardIncentive",                 1),
-    ("cardPinLength",                    2), ("cardPinSetDate",                8),
-    ("processorAuthReasonCode",          5), ("standinAdvice",                 1),
-    ("merchantId",                      16), ("cardOrder",                     1),
-    ("cashbackAmount",                  13), ("userData06",                   13),
-    ("userData07",                      40), ("paymentInstrumentId",          30),
-    ("avsRequest",                       1), ("cvrOfflinePinVerificationPerformed", 1),
-    ("cvrOfflinePinVerificationFailed",  1), ("cvrPinTryLimitExceeded",        1),
-    ("posUnattended",                    1), ("posOffPremises",                1),
-    ("posCardCapture",                   1), ("posSecurity",                   1),
-    ("authId",                           6), ("userData08",                   10),
-    ("userData09",                      10), ("userIndicator05",               1),
-    ("userIndicator06",                  1), ("userIndicator07",               5),
-    ("userIndicator08",                  5), ("modelControl1",                 1),
-    ("modelControl2",                    1), ("modelControl3",                 1),
-    ("modelControl4",                    1), ("RESERVED_04",                   3),
-    ("segmentId1",                       6), ("segmentId2",                    6),
-    ("segmentId3",                       6), ("segmentId4",                    6),
+    ("externalHeaderData",     20),   # variable length — user edits this string
 ]
 
 # =============================================================================
-# DEFAULT RESPONSE VALUES
+# DEFAULT VALUES
 # =============================================================================
 
-# ── Response header defaults ──────────────────────────────────────────────────
-DEFAULT_RESP_HEADER = {
-    # appDataLength (9 bytes) is AUTO-COMPUTED — always = RESPONSE_BODY_SIZE zero-padded to 9
-    "extHeaderLength":        "0020",         # 4 bytes — must match externalHeaderData length
-    "tranCode":               "200000102",    # 9 bytes
-    "sourceApplication":      "PMAX",         # 10 bytes — padded to 10
-    "destinationApplication": "IDFCTANGO",    # 10 bytes — padded to 10
-    "errorCode":              "0000000000",   # 10 bytes
-    "filler":                 " ",            # 1 byte
-    "externalHeaderData":     "DBTRAN251718532397  ", # variable — 20 bytes here
-    # RESERVED_01 (17 bytes) is AUTO-FILLED with spaces
+DEFAULT_HEADER = {
+    "appDataLength":          "00001067",   # auto
+    "extHeaderLength":        "0020",       # auto
+    "tranCode":               "200000102",
+    "sourceApplication":      "PMAX      ",
+    "destinationApplication": "IDFCTANGO ",
+    "errorCode":              "0000000000",
+    "filler":                 " ",
+    "externalHeaderData":     "DBTRAN251718532397  ",   # 20 chars default
 }
 
-# ── Response body defaults ────────────────────────────────────────────────────
-DEFAULT_RESP_BODY = {
-    "response_record_version": "4",
-    "score_count":             " 1",
+DEFAULT_RESPONSE = {
+    "response_record_version":  "4",
+    "score_count":              " 1",
+    # Score 1
     "score_name_1":  "FFM.FRD.CARD          ",
     "error_code_1":  "   0",
     "score_1":       "  12",
     "reason_1_1":    "   2",
     "reason_1_2":    "  12",
     "reason_1_3":    "   3",
+    # Score 2  (error_code_2 = 2 bytes)
     "score_name_2":  " " * 22, "error_code_2": "  ", "score_2": "    ",
     "reason_2_1":    "    ",   "reason_2_2":   "    ", "reason_2_3": "    ",
+    # Scores 3-8
     "score_name_3":  " " * 22, "error_code_3": "    ", "score_3": "    ",
     "reason_3_1":    "    ",   "reason_3_2":   "    ", "reason_3_3": "    ",
     "score_name_4":  " " * 22, "error_code_4": "    ", "score_4": "    ",
@@ -213,22 +241,24 @@ DEFAULT_RESP_BODY = {
     "reason_7_1":    "    ",   "reason_7_2":   "    ", "reason_7_3": "    ",
     "score_name_8":  " " * 22, "error_code_8": "    ", "score_8": "    ",
     "reason_8_1":    "    ",   "reason_8_2":   "    ", "reason_8_3": "    ",
+    # Segments
     "segment_id_1":  "gid180a1", "segment_id_2": "        ", "segment_id_3": "        ",
-    "filler1_1":     "  ",      "filler1_2":    "    ",      "filler1_3":    "  ",
+    "filler1_1":     "  ",       "filler1_2":    "    ",     "filler1_3":    "  ",
     "segment_id_4":  "        ", "segment_id_5": "        ", "segment_id_6": "        ",
-    "segment_id_7":  "        ", "filler2_1":    "    ",      "filler2_2":    "    ",
+    "segment_id_7":  "        ", "filler2_1":    "    ",     "filler2_2":    "    ",
     "segment_id_8":  "        ", "filler3":      "    ",
-    "decision_count": " 0",
-    "decision_type_1":  " " * 32, "decision_code_1":  " " * 32,
-    "decision_type_2":  " " * 32, "decision_code_2":  " " * 32,
-    "decision_type_3":  " " * 32, "decision_code_3":  " " * 32,
-    "decision_type_4":  " " * 32, "decision_code_4":  " " * 32,
-    "decision_type_5":  " " * 32, "decision_code_5":  " " * 32,
-    "decision_type_6":  " " * 32, "decision_code_6":  " " * 32,
-    "decision_type_7":  " " * 32, "decision_code_7":  " " * 32,
-    "decision_type_8":  " " * 32, "decision_code_8":  " " * 32,
-    "decision_type_9":  " " * 32, "decision_code_9":  " " * 32,
-    "decision_type_10": " " * 32, "decision_code_10": " " * 32,
+    # Decisions (count=0, all blank)
+    "decision_count":    " 0",
+    "decision_type_1":   " " * 32, "decision_code_1":  " " * 32,
+    "decision_type_2":   " " * 32, "decision_code_2":  " " * 32,
+    "decision_type_3":   " " * 32, "decision_code_3":  " " * 32,
+    "decision_type_4":   " " * 32, "decision_code_4":  " " * 32,
+    "decision_type_5":   " " * 32, "decision_code_5":  " " * 32,
+    "decision_type_6":   " " * 32, "decision_code_6":  " " * 32,
+    "decision_type_7":   " " * 32, "decision_code_7":  " " * 32,
+    "decision_type_8":   " " * 32, "decision_code_8":  " " * 32,
+    "decision_type_9":   " " * 32, "decision_code_9":  " " * 32,
+    "decision_type_10":  " " * 32, "decision_code_10": " " * 32,
     "scoring_server_id": "    ",
 }
 
@@ -236,14 +266,10 @@ DEFAULT_RESP_BODY = {
 # UTILITIES
 # =============================================================================
 
-def fw(val: str, size: int, pad: str = " ", right_align: bool = False) -> str:
-    """Fixed-width: pad or truncate to exact size. Default left-align + right-pad."""
+def fw(val: str, size: int) -> str:
+    """Fixed-width: truncate or right-pad with spaces."""
     s = str(val) if val is not None else ""
-    if len(s) >= size:
-        return s[:size]
-    if right_align:
-        return s.rjust(size, pad)
-    return s.ljust(size, pad)
+    return s[:size] if len(s) >= size else s + " " * (size - len(s))
 
 
 def parse_fields(raw: str, fields: list) -> dict:
@@ -254,13 +280,21 @@ def parse_fields(raw: str, fields: list) -> dict:
     return result
 
 
+def _verify_sizes():
+    """Assert RESPONSE_FIELDS total == 1067."""
+    total = sum(s for _, s in RESPONSE_FIELDS)
+    assert total == 1067, f"RESPONSE_FIELDS total={total} expected 1067"
+
+
+_verify_sizes()
+
+
 # =============================================================================
 # MAIN APPLICATION
 # =============================================================================
 
 class FalconSimulator:
 
-    # ── Catppuccin Mocha palette ──────────────────────────────────────────────
     BG      = "#1e1e2e"
     PANEL   = "#181825"
     CARD    = "#313244"
@@ -278,43 +312,42 @@ class FalconSimulator:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Euronet Falcon TCP Simulator  —  Developed by Rohan Sakhare")
-        self.root.geometry("1520x960")
+        self.root.geometry("1480x940")
         self.root.minsize(1100, 700)
         self.root.configure(bg=self.BG)
 
-        self.server_socket  = None
-        self.server_thread  = None
-        self.running        = False
-        self.client_conn    = None
-        self.log_queue      = queue.Queue()
-        self._bound_ip      = ""
-        self._bound_port    = 0
-        self._last_ext_hdr  = ""   # mirrors the ext header received — for echo-back
+        self.server_socket = None
+        self.server_thread = None
+        self.running       = False
+        self.client_conn   = None
+        self.log_queue     = queue.Queue()
+        self._bound_ip     = ""
+        self._bound_port   = 0
 
-        # ── Active response dicts — ONLY updated by _save_response() ─────────
-        self.active_hdr:  dict = copy.deepcopy(DEFAULT_RESP_HEADER)
-        self.active_body: dict = copy.deepcopy(DEFAULT_RESP_BODY)
+        # ACTIVE dicts — only updated by _save_response()
+        self.active_header:   dict = copy.deepcopy(DEFAULT_HEADER)
+        self.active_response: dict = copy.deepcopy(DEFAULT_RESPONSE)
 
-        # ── StringVar dicts (live UI editing — not sent until saved) ─────────
-        self.svars_hdr:  dict = {}
-        self.svars_body: dict = {}
+        # StringVar dicts (live UI — NOT used for sending)
+        self.svars_header:   dict = {}
+        self.svars_response: dict = {}
 
         self._build_ui()
         self._poll_log()
 
     # =========================================================================
-    # SAVE / UNSAVED STATE
+    # ✅  SAVE RESPONSE
     # =========================================================================
 
     def _save_response(self):
         for svars, active in (
-            (self.svars_hdr,  self.active_hdr),
-            (self.svars_body, self.active_body),
+            (self.svars_header,   self.active_header),
+            (self.svars_response, self.active_response),
         ):
             for key, var in svars.items():
                 active[key] = var.get()
         self._set_save_state(True)
-        self._log("✅  Response saved — will be used for next request.", "success")
+        self._log("✅  Response committed — next request will use these values.", "success")
 
     def _set_save_state(self, saved: bool):
         if saved:
@@ -328,166 +361,87 @@ class FalconSimulator:
         self._set_save_state(False)
 
     # =========================================================================
-    # BUILD RESPONSE — THE CORE FIX
+    # BUILD RESPONSE  (reads active dicts only)
     # =========================================================================
 
-    def _build_response(self, echo_ext_hdr: str = "") -> str:
+    def _build_response(self) -> str:
         """
-        Assemble the complete fixed-length outbound Falcon message.
+        Assembles the complete outbound fixed-length TCP message:
 
-        Outbound layout (matching C++ vcDBTrans25Header for the RESPONSE direction):
-          [9]  appDataLength       ← zero-padded, AUTO = RESPONSE_BODY_SIZE (1067)
-          [4]  extHeaderLength     ← length of externalHeaderData field
-          [9]  tranCode
-          [10] sourceApplication
-          [10] destinationApplication
-          [10] errorCode
-          [1]  filler
-          [N]  externalHeaderData  ← N = int(extHeaderLength), padded to N
-          [17] RESERVED_01         ← always 17 spaces
-          ---- body (1067 bytes) ----
+          Header  (72 bytes minimum, grows with externalHeaderData):
+            appDataLength      [8]   ← AUTO: len(app_data), zero-padded
+            extHeaderLength    [4]   ← AUTO: len(externalHeaderData), zero-padded
+            tranCode           [9]
+            sourceApplication  [10]
+            destinationApp     [10]
+            errorCode          [10]
+            filler             [1]
+            externalHeaderData [variable — user-defined string]
 
-        Total = 9+4+9+10+10+10+1+N+17 + 1067  bytes
+          App data  [1067 bytes — vcDBTrans25Response layout]:
+            response body (RESPONSE_FIELDS) — single contiguous block
+
+        Total = (8+4+9+10+10+10+1+len(extHdr)) + 1067
         """
-        h = self.active_hdr
-        b = self.active_body
+        h = self.active_header
+        r = self.active_response
 
-        # externalHeaderData: if echo mode is on, use what we received
-        ext_hdr_str = echo_ext_hdr if echo_ext_hdr else h.get("externalHeaderData", "")
+        # ── App data (1067 bytes) ──────────────────────────────────────────
+        app_data = "".join(fw(r.get(name, ""), size) for name, size in RESPONSE_FIELDS)
+        app_len  = len(app_data)  # always 1067
 
-        # extHeaderLength must match actual ext_hdr_str length
-        ext_hdr_len = len(ext_hdr_str)
-        ext_hdr_len_field = str(ext_hdr_len).zfill(4)   # 4-byte field, zero-padded
+        # ── External header data (variable, user-editable) ─────────────────
+        ext_hdr_str = h.get("externalHeaderData", "DBTRAN251718532397  ")
+        ext_hdr_len = len(ext_hdr_str)   # auto-compute from actual content
 
-        # Build body
-        body_parts = []
-        for name, size in RESPONSE_BODY_FIELDS:
-            val = b.get(name, "")
-            body_parts.append(fw(val, size))
-        body_str = "".join(body_parts)
-
-        assert len(body_str) == RESPONSE_BODY_SIZE, \
-            f"Body size mismatch: {len(body_str)} != {RESPONSE_BODY_SIZE}"
-
-        # appDataLength = body size, 9 bytes, zero-padded (THE KEY FIX)
-        app_data_len_field = str(RESPONSE_BODY_SIZE).zfill(9)   # "000001067"
-
-        # Build header
+        # ── Header (8+4+9+10+10+10+1+ext_hdr_len) ─────────────────────────
         header = (
-            app_data_len_field +                                           # [9]
-            ext_hdr_len_field +                                            # [4]
-            fw(h.get("tranCode",               "200000102"),       9) +    # [9]
-            fw(h.get("sourceApplication",      "PMAX"),           10) +    # [10]
-            fw(h.get("destinationApplication", "IDFCTANGO"),      10) +    # [10]
-            fw(h.get("errorCode",              "0000000000"),     10) +    # [10]
-            fw(h.get("filler",                 " "),               1) +    # [1]
-            fw(ext_hdr_str,                               ext_hdr_len) +   # [N]
-            fw("",                                                17)       # [17] RESERVED_01
+            str(app_len).zfill(8)  +                          # [8]  appDataLength
+            str(ext_hdr_len).zfill(4) +                       # [4]  extHeaderLength (auto)
+            fw(h.get("tranCode",               "200000102"), 9)  +   # [9]
+            fw(h.get("sourceApplication",      "PMAX      "), 10) +  # [10]
+            fw(h.get("destinationApplication", "IDFCTANGO "), 10) +  # [10]
+            fw(h.get("errorCode",              "0000000000"), 10) +  # [10]
+            fw(h.get("filler",                 " "),           1)  +  # [1]
+            ext_hdr_str                                              # [variable]
         )
-
-        full_msg = header + body_str
-        return full_msg
+        return header + app_data
 
     # =========================================================================
-    # BUILD UI
+    # UI
     # =========================================================================
 
     def _build_ui(self):
         self._apply_styles()
 
-        # ── Banner ────────────────────────────────────────────────────────────
-        banner = tk.Frame(self.root, bg="#11111b", height=54)
+        # ── Banner ────────────────────────────────────────────────────────
+        banner = tk.Frame(self.root, bg="#11111b", height=52)
         banner.pack(fill="x")
         banner.pack_propagate(False)
-        tk.Label(banner,
-                 text="🦅  EURONET FALCON TCP SIMULATOR",
+        tk.Label(banner, text="🦅  EURONET FALCON TCP SIMULATOR",
                  bg="#11111b", fg=self.ACCENT,
-                 font=("Consolas", 14, "bold")
-                 ).pack(side="left", padx=20, pady=12)
-        tk.Label(banner,
-                 text="Developed by Rohan Sakhare  |  IDFC First Bank / Euronet",
+                 font=("Consolas", 14, "bold")).pack(side="left", padx=20, pady=12)
+        tk.Label(banner, text="Developed by Rohan Sakhare  |  IDFC First Bank",
                  bg="#11111b", fg=self.TXT2,
-                 font=("Consolas", 10)
-                 ).pack(side="left", padx=4)
-        # Size info badge
-        tk.Label(banner,
-                 text=f"  Body={RESPONSE_BODY_SIZE}B  appDataLen=9B  Header=9+4+9+10+10+10+1+N+17",
-                 bg="#11111b", fg=self.TEAL,
-                 font=("Consolas", 9)
-                 ).pack(side="left", padx=12)
+                 font=("Consolas", 10)).pack(side="left", padx=4)
         self.dot = tk.Label(banner, text="●  STOPPED",
                             bg="#11111b", fg=self.RED,
                             font=("Consolas", 11, "bold"))
         self.dot.pack(side="right", padx=20)
 
-        # ── Control bar ───────────────────────────────────────────────────────
+        # ── Control bar ───────────────────────────────────────────────────
         ctrl = tk.Frame(self.root, bg=self.PANEL, height=58)
         ctrl.pack(fill="x")
         ctrl.pack_propagate(False)
+        self._build_ctrl_bar(ctrl)
 
-        def lbl(t):
-            return tk.Label(ctrl, text=t, bg=self.PANEL, fg=self.TXT2,
-                            font=("Consolas", 10))
-        def ent(var, w):
-            return tk.Entry(ctrl, textvariable=var, width=w,
-                            bg=self.CARD, fg=self.TXT,
-                            insertbackground=self.TXT,
-                            relief="flat", font=("Consolas", 11), bd=2)
-        def btn(text, cmd, bg, fg="white", **kw):
-            return tk.Button(ctrl, text=text, command=cmd,
-                             bg=bg, fg=fg, font=("Consolas", 10, "bold"),
-                             relief="flat", padx=12, cursor="hand2", **kw)
-
-        lbl("Listen IP:").pack(side="left", padx=(16, 4), pady=16)
-        self.ip_var = tk.StringVar(value="127.0.0.1")
-        ent(self.ip_var, 15).pack(side="left", padx=4)
-        lbl("Port:").pack(side="left", padx=(10, 4))
-        self.port_var = tk.StringVar(value="8070")
-        ent(self.port_var, 7).pack(side="left", padx=4)
-
-        self.start_btn = btn("▶  START", self._start_server, "#40a02b")
-        self.start_btn.pack(side="left", padx=12)
-        self.stop_btn  = btn("■  STOP",  self._stop_server,  self.CARD,
-                             fg=self.RED, state="disabled")
-        self.stop_btn.pack(side="left", padx=2)
-
-        # Echo-header toggle
-        self.echo_hdr_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(ctrl,
-                       text="Echo ext header from request",
-                       variable=self.echo_hdr_var,
-                       bg=self.PANEL, fg=self.TEAL,
-                       selectcolor=self.CARD,
-                       activebackground=self.PANEL,
-                       font=("Consolas", 9)
-                       ).pack(side="left", padx=12)
-
-        # Right side
-        btn("🗑  Clear Log",     self._clear_log,      self.CARD, fg=self.TXT2
-            ).pack(side="right", padx=12)
-        btn("📂  Load Template", self._load_template,  self.CARD, fg=self.ACCENT2
-            ).pack(side="right", padx=4)
-        btn("💾  Save Template", self._save_template,  self.CARD, fg=self.ACCENT2
-            ).pack(side="right", padx=4)
-
-        tk.Frame(ctrl, bg=self.BORDER, width=2).pack(
-            side="right", fill="y", pady=8, padx=8)
-
-        self.save_resp_btn = btn("✅  Save Response", self._save_response, "#40a02b")
-        self.save_resp_btn.pack(side="right", padx=6)
-
-        self.save_indicator = tk.Label(ctrl, text="● saved", fg=self.GREEN,
-                                       bg=self.PANEL, font=("Consolas", 9, "bold"))
-        self.save_indicator.pack(side="right", padx=(0, 2))
-
-        # ── Main paned area ───────────────────────────────────────────────────
+        # ── Main area ─────────────────────────────────────────────────────
         pane = tk.PanedWindow(self.root, orient="horizontal",
                               bg=self.BG, sashwidth=5, sashrelief="flat")
         pane.pack(fill="both", expand=True)
-
         left  = tk.Frame(pane, bg=self.BG)
         right = tk.Frame(pane, bg=self.BG)
-        pane.add(left,  minsize=680)
+        pane.add(left,  minsize=640)
         pane.add(right, minsize=380)
 
         nb = ttk.Notebook(left)
@@ -498,16 +452,29 @@ class FalconSimulator:
         self._build_request_tab(t0)
 
         t1 = tk.Frame(nb, bg=self.BG)
-        nb.add(t1, text="  📤 Response Header  ")
-        self._build_header_editor_tab(t1)
+        nb.add(t1, text="  📤 Header (ISO 124)  ")
+        self._build_editor_tab(
+            t1,
+            "Outbound Header  —  appDataLength & extHeaderLength are AUTO-computed",
+            DEFAULT_HEADER,
+            HEADER_FIELDS_EDITOR,
+            self.svars_header,
+            auto_fields={"appDataLength", "extHeaderLength"},
+            auto_note={
+                "appDataLength":  "always len(app data body) = 1067",
+                "extHeaderLength":"always len(externalHeaderData string)",
+            },
+        )
 
         t2 = tk.Frame(nb, bg=self.BG)
-        nb.add(t2, text="  📊 Response Body (Scores + Decisions)  ")
-        self._build_body_editor_tab(t2)
-
-        t3 = tk.Frame(nb, bg=self.BG)
-        nb.add(t3, text="  📐 Field Size Reference  ")
-        self._build_size_reference_tab(t3)
+        nb.add(t2, text="  📊 Response Body (vcDBTrans25Response)  ")
+        self._build_editor_tab(
+            t2,
+            "Response Body  —  1067 bytes total  |  ⚠ error_code_2 = 2 bytes (not 4)",
+            DEFAULT_RESPONSE,
+            RESPONSE_FIELDS,
+            self.svars_response,
+        )
 
         self._build_log_panel(right)
 
@@ -524,33 +491,63 @@ class FalconSimulator:
         s.configure("TScrollbar", background=self.CARD,
                     troughcolor=self.PANEL, arrowcolor=self.TXT2)
 
-    # ── Request viewer ────────────────────────────────────────────────────────
+    def _build_ctrl_bar(self, ctrl):
+        def lbl(t):
+            return tk.Label(ctrl, text=t, bg=self.PANEL, fg=self.TXT2, font=("Consolas", 10))
+        def ent(var, w):
+            return tk.Entry(ctrl, textvariable=var, width=w, bg=self.CARD, fg=self.TXT,
+                            insertbackground=self.TXT, relief="flat", font=("Consolas", 11), bd=2)
+        def btn(text, cmd, bg, fg="white", **kw):
+            return tk.Button(ctrl, text=text, command=cmd, bg=bg, fg=fg,
+                             font=("Consolas", 10, "bold"), relief="flat",
+                             padx=12, cursor="hand2", **kw)
+
+        lbl("Listen IP:").pack(side="left", padx=(16, 4), pady=16)
+        self.ip_var = tk.StringVar(value="127.0.0.1")
+        ent(self.ip_var, 15).pack(side="left", padx=4)
+        lbl("Port:").pack(side="left", padx=(10, 4))
+        self.port_var = tk.StringVar(value="8070")
+        ent(self.port_var, 7).pack(side="left", padx=4)
+
+        self.start_btn = btn("▶  START", self._start_server, "#40a02b")
+        self.start_btn.pack(side="left", padx=12)
+        self.stop_btn = btn("■  STOP", self._stop_server, self.CARD, fg=self.RED, state="disabled")
+        self.stop_btn.pack(side="left", padx=2)
+
+        # Right side
+        btn("🗑  Clear Log",    self._clear_log,     self.CARD, fg=self.TXT2).pack(side="right", padx=12)
+        btn("📂  Load Template", self._load_template, self.CARD, fg=self.ACCENT2).pack(side="right", padx=4)
+        btn("💾  Save Template", self._save_template, self.CARD, fg=self.ACCENT2).pack(side="right", padx=4)
+        tk.Frame(ctrl, bg=self.BORDER, width=2).pack(side="right", fill="y", pady=8, padx=8)
+
+        self.save_resp_btn = btn("✅  Save Response", self._save_response, "#40a02b")
+        self.save_resp_btn.pack(side="right", padx=6)
+        self.save_indicator = tk.Label(ctrl, text="● saved", fg=self.GREEN, bg=self.PANEL,
+                                       font=("Consolas", 9, "bold"))
+        self.save_indicator.pack(side="right", padx=(0, 2))
+
+    # ── Request viewer tab ────────────────────────────────────────────────────
 
     def _build_request_tab(self, parent):
         top = tk.Frame(parent, bg=self.BG)
         top.pack(fill="x", padx=8, pady=(6, 2))
-        tk.Label(top, text="Last received request — parsed fields",
+        tk.Label(top, text="Last received inbound request — parsed fields",
                  bg=self.BG, fg=self.TXT2, font=("Consolas", 9)).pack(side="left")
         tk.Button(top, text="🗑  Clear", command=self._clear_request,
                   bg=self.CARD, fg=self.RED, font=("Consolas", 9),
                   relief="flat", padx=8, cursor="hand2").pack(side="right")
 
         self.req_text = scrolledtext.ScrolledText(
-            parent, bg=self.PANEL, fg=self.TXT, font=("Consolas", 10),
-            relief="flat", selectbackground=self.ACCENT,
-            selectforeground="#11111b", insertbackground=self.TXT,
-            state="disabled")
+            parent, bg=self.PANEL, fg=self.TXT, font=("Consolas", 10), relief="flat",
+            selectbackground=self.ACCENT, selectforeground="#11111b",
+            insertbackground=self.TXT, state="disabled")
         self.req_text.pack(fill="both", expand=True, padx=6, pady=(2, 6))
 
         for tag, fg, bold in [
-            ("sec",  self.ACCENT,  True),
-            ("fld",  self.ACCENT2, False),
-            ("val",  self.TXT,     False),
-            ("raw",  self.YELLOW,  False),
-            ("ts",   self.TXT2,    False),
-            ("sep",  self.BORDER,  False),
-            ("err",  self.RED,     False),
-            ("info", self.TEAL,    False),
+            ("sec", self.ACCENT,  True), ("fld", self.ACCENT2, False),
+            ("val", self.TXT,     False), ("raw", self.YELLOW,  False),
+            ("ts",  self.TXT2,    False), ("sep", self.BORDER,  False),
+            ("err", self.RED,     False),
         ]:
             self.req_text.tag_configure(
                 tag, foreground=fg,
@@ -561,289 +558,136 @@ class FalconSimulator:
         self.req_text.delete("1.0", "end")
         self.req_text.config(state="disabled")
 
-    # ── Response header editor ────────────────────────────────────────────────
+    # ── Generic editor tab ────────────────────────────────────────────────────
 
-    def _build_header_editor_tab(self, parent):
-        info = tk.Frame(parent, bg="#1a1a2e", pady=6)
-        info.pack(fill="x", padx=8, pady=(6, 2))
-        lines = [
-            "  📐 RESPONSE HEADER LAYOUT (C++ vcDBTrans25Header):",
-            f"  [9]  appDataLength         AUTO = {RESPONSE_BODY_SIZE} → '{str(RESPONSE_BODY_SIZE).zfill(9)}'   ← THE KEY FIX (was 8 bytes before)",
-            "  [4]  extHeaderLength        AUTO from externalHeaderData length",
-            "  [9]  tranCode",
-            "  [10] sourceApplication",
-            "  [10] destinationApplication",
-            "  [10] errorCode",
-            "  [1]  filler",
-            "  [N]  externalHeaderData     N = extHeaderLength value",
-            "  [17] RESERVED_01            AUTO = 17 spaces",
-        ]
-        for line in lines:
-            tk.Label(info, text=line, bg="#1a1a2e", fg=self.TEAL,
-                     font=("Consolas", 9), anchor="w").pack(fill="x", padx=4)
+    def _build_editor_tab(self, parent, title: str, defaults: dict,
+                          fields: list, var_dict: dict,
+                          auto_fields: set = None, auto_note: dict = None):
+        auto_fields = auto_fields or set()
+        auto_note   = auto_note   or {}
 
-        note = tk.Frame(parent, bg="#2a2a3e", pady=3)
-        note.pack(fill="x", padx=8, pady=(0, 6))
+        hf = tk.Frame(parent, bg=self.BG)
+        hf.pack(fill="x", padx=8, pady=(6, 0))
+        tk.Label(hf, text=title, bg=self.BG, fg=self.ACCENT,
+                 font=("Consolas", 10, "bold")).pack(side="left")
+
+        note = tk.Frame(parent, bg="#2a2a3e", pady=4)
+        note.pack(fill="x", padx=8, pady=(2, 6))
         tk.Label(note,
-                 text="  ✏  Edit fields below, then click  ✅ Save Response  to apply."
-                      "  appDataLength and RESERVED_01 are auto-computed.",
-                 bg="#2a2a3e", fg=self.YELLOW, font=("Consolas", 9)
-                 ).pack(side="left")
+                 text="  ✏  Edit values, then click  ✅ Save Response  to apply.  "
+                      "Fields are fixed-width — auto padded/trimmed on send.",
+                 bg="#2a2a3e", fg=self.YELLOW, font=("Consolas", 9)).pack(side="left")
 
-        # Scrollable editor
         canvas = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
         sb     = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
-        canvas.pack(fill="both", expand=True, padx=6)
+        canvas.pack(fill="both", expand=True, padx=6, pady=2)
 
         inner  = tk.Frame(canvas, bg=self.BG)
-        wid    = canvas.create_window((0, 0), window=inner, anchor="nw")
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
 
         def _resize(e=None):
             canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfig(wid, width=canvas.winfo_width())
+            canvas.itemconfig(win_id, width=canvas.winfo_width())
 
         inner.bind("<Configure>", _resize)
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(wid, width=e.width))
-        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            canvas.bind(ev, lambda e, c=canvas: c.yview_scroll(
-                -1*(e.delta//120) if e.num not in (4,5) else (-1 if e.num==4 else 1), "units"))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
+        canvas.bind("<MouseWheel>",
+                    lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        canvas.bind("<Button-5>", lambda e: canvas.yview_scroll( 1, "units"))
 
         # Column headers
-        hdr_row = tk.Frame(inner, bg=self.CARD)
-        hdr_row.pack(fill="x", padx=2, pady=(2, 1))
-        for col, w in [("Field", 30), ("Size", 8), ("Active value", 28), ("Edit", 0)]:
-            tk.Label(hdr_row, text=col, bg=self.CARD, fg=self.ACCENT,
+        hdr = tk.Frame(inner, bg=self.CARD)
+        hdr.pack(fill="x", padx=2, pady=(2, 1))
+        for col, w in [("Field Name", 30), ("Size", 6), ("Active Value (sent)", 24), ("Edit Value", 0)]:
+            tk.Label(hdr, text=col, bg=self.CARD, fg=self.ACCENT,
                      font=("Consolas", 9, "bold"), width=w, anchor="w"
                      ).pack(side="left", padx=6, pady=3)
 
-        # Auto fields (read-only display)
-        auto_fields = [
-            ("appDataLength",  9,
-             f"AUTO = {str(RESPONSE_BODY_SIZE).zfill(9)}  (body={RESPONSE_BODY_SIZE} bytes, 9-char zero-padded)"),
-            ("extHeaderLength", 4,
-             "AUTO = len(externalHeaderData) zero-padded to 4"),
-            ("RESERVED_01",   17,
-             "AUTO = 17 spaces"),
-        ]
-        for fname, fsize, desc in auto_fields:
-            row = tk.Frame(inner, bg="#0d0d1a")
-            row.pack(fill="x", padx=2, pady=1)
-            tk.Label(row, text=fname, bg="#0d0d1a", fg=self.TXT2,
-                     font=("Consolas", 9), width=30, anchor="w").pack(side="left", padx=6)
-            tk.Label(row, text=str(fsize), bg="#0d0d1a", fg=self.TXT2,
-                     font=("Consolas", 9), width=8, anchor="w").pack(side="left", padx=2)
-            tk.Label(row, text="", bg="#0d0d1a", fg=self.TXT2,
-                     width=28, anchor="w").pack(side="left", padx=4)
-            tk.Label(row, text=desc, bg="#0d0d1a", fg=self.TXT2,
-                     font=("Consolas", 8, "italic")).pack(side="left", padx=8)
+        # Which active dict to pull "current active" value from
+        if var_dict is self.svars_header:
+            active_src = self.active_header
+        else:
+            active_src = self.active_response
 
-        # Editable header fields
-        editable_hdr = [
-            ("tranCode",               9,  "tranCode"),
-            ("sourceApplication",     10,  "sourceApplication"),
-            ("destinationApplication",10,  "destinationApplication"),
-            ("errorCode",             10,  "errorCode"),
-            ("filler",                 1,  "filler"),
-            ("externalHeaderData",    20,  "externalHeaderData  ← length determines extHeaderLength"),
-        ]
-        for fname, fsize, label in editable_hdr:
-            default_val = DEFAULT_RESP_HEADER.get(fname, "")
-            active_val  = self.active_hdr.get(fname, default_val)
+        for name, size in fields:
+            default_val = defaults.get(name, "")
+            active_val  = active_src.get(name, default_val)
+            is_auto     = name in auto_fields
+            is_special  = (name == "error_code_2")  # highlight the unusual field
 
-            row = tk.Frame(inner, bg=self.PANEL)
-            row.pack(fill="x", padx=2, pady=1)
-
-            tk.Label(row, text=label, bg=self.PANEL, fg=self.ACCENT2,
-                     font=("Consolas", 9), width=30, anchor="w").pack(side="left", padx=6)
-            tk.Label(row, text=str(fsize), bg=self.PANEL, fg=self.TXT2,
-                     font=("Consolas", 9), width=8, anchor="w").pack(side="left", padx=2)
-            tk.Label(row, text=repr(active_val), bg=self.PANEL, fg=self.GREEN,
-                     font=("Consolas", 8), width=28, anchor="w").pack(side="left", padx=4)
-
-            var = tk.StringVar(value=str(default_val))
-            self.svars_hdr[fname] = var
-            var.trace_add("write", self._on_field_changed)
-            tk.Entry(row, textvariable=var,
-                     bg=self.CARD, fg=self.TXT, insertbackground=self.TXT,
-                     relief="flat", font=("Consolas", 9), width=60
-                     ).pack(side="left", padx=4, pady=2, fill="x", expand=True)
-
-    # ── Response body editor ──────────────────────────────────────────────────
-
-    def _build_body_editor_tab(self, parent):
-        info = tk.Frame(parent, bg="#1a1a2e", pady=4)
-        info.pack(fill="x", padx=8, pady=(6, 2))
-        tk.Label(info,
-                 text=f"  📐 RESPONSE BODY — {RESPONSE_BODY_SIZE} bytes total  "
-                      f"(exact per C++ vcDBTrans25Response)",
-                 bg="#1a1a2e", fg=self.TEAL, font=("Consolas", 9, "bold")
-                 ).pack(side="left", padx=4)
-        tk.Label(info,
-                 text="  ⚠  error_code_2 = 2 bytes (matches C++ typo in original)",
-                 bg="#1a1a2e", fg=self.YELLOW, font=("Consolas", 9)
-                 ).pack(side="left", padx=8)
-
-        note = tk.Frame(parent, bg="#2a2a3e", pady=3)
-        note.pack(fill="x", padx=8, pady=(0, 4))
-        tk.Label(note,
-                 text="  ✏  Edit values below, then click  ✅ Save Response.",
-                 bg="#2a2a3e", fg=self.YELLOW, font=("Consolas", 9)
-                 ).pack(side="left")
-
-        canvas = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
-        sb     = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        canvas.pack(fill="both", expand=True, padx=6)
-
-        inner  = tk.Frame(canvas, bg=self.BG)
-        wid    = canvas.create_window((0, 0), window=inner, anchor="nw")
-
-        def _resize(e=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-            canvas.itemconfig(wid, width=canvas.winfo_width())
-
-        inner.bind("<Configure>", _resize)
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(wid, width=e.width))
-        for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
-            canvas.bind(ev, lambda e, c=canvas: c.yview_scroll(
-                -1*(e.delta//120) if e.num not in (4,5) else (-1 if e.num==4 else 1), "units"))
-
-        hdr_row = tk.Frame(inner, bg=self.CARD)
-        hdr_row.pack(fill="x", padx=2, pady=(2, 1))
-        for col, w in [("Field", 30), ("Size", 6), ("Active", 26), ("Edit", 0)]:
-            tk.Label(hdr_row, text=col, bg=self.CARD, fg=self.ACCENT,
-                     font=("Consolas", 9, "bold"), width=w, anchor="w"
-                     ).pack(side="left", padx=6, pady=3)
-
-        # Group separator colours
-        section_starts = {
-            "response_record_version": ("📊 HEADER", self.ACCENT),
-            "score_name_1": ("🏅 SCORE 1", self.ACCENT2),
-            "score_name_2": ("🏅 SCORE 2", self.ACCENT2),
-            "score_name_3": ("🏅 SCORE 3", self.ACCENT2),
-            "score_name_4": ("🏅 SCORE 4", self.ACCENT2),
-            "score_name_5": ("🏅 SCORE 5", self.ACCENT2),
-            "score_name_6": ("🏅 SCORE 6", self.ACCENT2),
-            "score_name_7": ("🏅 SCORE 7", self.ACCENT2),
-            "score_name_8": ("🏅 SCORE 8", self.ACCENT2),
-            "segment_id_1": ("📦 SEGMENTS + FILLERS", self.ORANGE),
-            "decision_count": ("✅ DECISIONS", self.GREEN),
-            "scoring_server_id": ("🖥 SERVER ID", self.TEAL),
-        }
-
-        offset = 0
-        for name, size in RESPONSE_BODY_FIELDS:
-            if name in section_starts:
-                label, colour = section_starts[name]
-                sep = tk.Frame(inner, bg=colour, height=1)
-                sep.pack(fill="x", padx=2, pady=(6, 0))
-                tk.Label(inner, text=f"  {label}", bg=self.BG, fg=colour,
-                         font=("Consolas", 9, "bold"), anchor="w"
-                         ).pack(fill="x", padx=4)
-
-            default_val = DEFAULT_RESP_BODY.get(name, "")
-            active_val  = self.active_body.get(name, default_val)
-            is_warn     = (name == "error_code_2")   # highlight the 2-byte anomaly
-
-            row_bg = "#1a1a2e" if is_warn else self.PANEL
+            row_bg = "#252535" if is_special else self.PANEL
             row = tk.Frame(inner, bg=row_bg)
             row.pack(fill="x", padx=2, pady=1)
 
-            lbl_fg = self.YELLOW if is_warn else self.ACCENT2
-            tk.Label(row, text=f"{name}  [offset {offset}]",
-                     bg=row_bg, fg=lbl_fg,
-                     font=("Consolas", 9), width=30, anchor="w").pack(side="left", padx=6)
-            tk.Label(row, text=str(size), bg=row_bg, fg=self.TXT2,
-                     font=("Consolas", 9), width=6, anchor="w").pack(side="left", padx=2)
-            tk.Label(row, text=repr(active_val), bg=row_bg, fg=self.GREEN,
-                     font=("Consolas", 8), width=26, anchor="w").pack(side="left", padx=4)
+            name_color = self.YELLOW if is_special else self.ACCENT2
+            tk.Label(row, text=name, bg=row_bg, fg=name_color,
+                     font=("Consolas", 9, "bold") if is_special else ("Consolas", 9),
+                     width=30, anchor="w").pack(side="left", padx=6)
+
+            size_color = self.ORANGE if is_special else self.TXT2
+            tk.Label(row, text=str(size), bg=row_bg, fg=size_color,
+                     font=("Consolas", 9, "bold") if is_special else ("Consolas", 9),
+                     width=6, anchor="w").pack(side="left", padx=2)
+
+            # Active value column
+            if is_auto:
+                active_lbl_text = auto_note.get(name, "(auto)")
+                active_lbl_fg   = self.TXT2
+            else:
+                active_lbl_text = repr(active_val)
+                active_lbl_fg   = self.GREEN
+            tk.Label(row, text=active_lbl_text, bg=row_bg, fg=active_lbl_fg,
+                     font=("Consolas", 8), width=24, anchor="w"
+                     ).pack(side="left", padx=4)
 
             var = tk.StringVar(value=str(default_val))
-            self.svars_body[name] = var
-            var.trace_add("write", self._on_field_changed)
-            tk.Entry(row, textvariable=var,
-                     bg=self.CARD, fg=self.TXT, insertbackground=self.TXT,
-                     relief="flat", font=("Consolas", 9), width=60
-                     ).pack(side="left", padx=4, pady=2, fill="x", expand=True)
+            var_dict[name] = var
 
-            offset += size
-
-    # ── Field size reference tab ──────────────────────────────────────────────
-
-    def _build_size_reference_tab(self, parent):
-        frame = tk.Frame(parent, bg=self.BG)
-        frame.pack(fill="both", expand=True, padx=8, pady=8)
-
-        tk.Label(frame,
-                 text="📐  Field Size Reference — sourced from C++ FalconPlugin.cpp",
-                 bg=self.BG, fg=self.ACCENT, font=("Consolas", 11, "bold")
-                 ).pack(anchor="w", pady=(0, 6))
-
-        txt = scrolledtext.ScrolledText(
-            frame, bg=self.PANEL, fg=self.TXT, font=("Consolas", 10),
-            relief="flat", state="normal")
-        txt.pack(fill="both", expand=True)
-
-        lines = [
-            "── OUTBOUND RESPONSE HEADER (C++ vcDBTrans25Header) ─────────────────────────",
-            f"  appDataLength          [9]   AUTO = {str(RESPONSE_BODY_SIZE).zfill(9)}  ← 9 BYTES! (was 8 = BUG)",
-            "  extHeaderLength        [4]   AUTO = len(externalHeaderData) zero-padded",
-            "  tranCode               [9]",
-            "  sourceApplication     [10]",
-            "  destinationApplication[10]",
-            "  errorCode             [10]",
-            "  filler                 [1]",
-            "  externalHeaderData    [N]   N = extHeaderLength value",
-            "  RESERVED_01           [17]  AUTO = spaces",
-            "",
-            f"── OUTBOUND RESPONSE BODY (C++ vcDBTrans25Response) — {RESPONSE_BODY_SIZE} bytes total ────────",
-        ]
-        for name, size in RESPONSE_BODY_FIELDS:
-            note = "  ⚠ 2 bytes (not 4!)" if name == "error_code_2" else ""
-            lines.append(f"  {name:<35} [{size}]{note}")
-
-        lines += [
-            "",
-            "── INBOUND HEADER (C++ vcDBTrans25Header inbound) ─────────────────────────",
-            "  appDataLength          [9]",
-            "  extHeaderLength        [4]",
-            "  tranCode               [9]",
-            "  sourceApplication     [10]",
-            "  destinationApplication[10]",
-            "  errorCode             [10]",
-            "  filler                 [1]",
-            "  externalHeaderData    [N]   N = int(extHeaderLength)",
-            "  RESERVED_01           [17]",
-        ]
-
-        txt.insert("end", "\n".join(lines))
-        txt.config(state="disabled")
+            if is_auto:
+                tk.Label(row, text="← auto-computed on every send",
+                         bg=row_bg, fg=self.TXT2,
+                         font=("Consolas", 9, "italic")).pack(side="left", padx=8)
+            else:
+                var.trace_add("write", self._on_field_changed)
+                entry_bg = "#3a3a52" if is_special else self.CARD
+                entry = tk.Entry(row, textvariable=var, bg=entry_bg, fg=self.TXT,
+                                 insertbackground=self.TXT, relief="flat",
+                                 font=("Consolas", 9), width=60)
+                entry.pack(side="left", padx=4, pady=2, fill="x", expand=True)
+                if is_special:
+                    tk.Label(row, text="← ⚠ SIZE=2", bg=row_bg, fg=self.ORANGE,
+                             font=("Consolas", 8, "bold")).pack(side="left", padx=2)
 
     # ── Log panel ─────────────────────────────────────────────────────────────
 
     def _build_log_panel(self, parent):
-        tk.Label(parent, text="📋  Activity Log",
+        hdr = tk.Frame(parent, bg=self.BG)
+        hdr.pack(fill="x", padx=8, pady=(8, 2))
+        tk.Label(hdr, text="📋  Activity Log",
                  bg=self.BG, fg=self.ACCENT,
-                 font=("Consolas", 11, "bold")).pack(anchor="w", padx=8, pady=(8, 2))
+                 font=("Consolas", 11, "bold")).pack(side="left")
+
+        # Stats bar
+        self.stats_var = tk.StringVar(value="TX: 0  |  RX: 0  |  Bytes sent: 0")
+        tk.Label(hdr, textvariable=self.stats_var,
+                 bg=self.BG, fg=self.TXT2, font=("Consolas", 8)).pack(side="right", padx=4)
+        self._tx_count = 0
+        self._rx_count = 0
+        self._bytes_sent = 0
 
         self.log_text = scrolledtext.ScrolledText(
-            parent, bg=self.PANEL, fg=self.TXT, font=("Consolas", 10),
-            relief="flat", selectbackground=self.ACCENT,
-            selectforeground="#11111b", insertbackground=self.TXT,
-            state="disabled", wrap="word")
+            parent, bg=self.PANEL, fg=self.TXT, font=("Consolas", 10), relief="flat",
+            selectbackground=self.ACCENT, selectforeground="#11111b",
+            insertbackground=self.TXT, state="disabled", wrap="word")
         self.log_text.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
         for tag, fg in [
-            ("ts",      self.TXT2),
-            ("info",    self.ACCENT2),
-            ("success", self.GREEN),
-            ("error",   self.RED),
-            ("warn",    self.YELLOW),
-            ("raw",     self.ORANGE),
-            ("sep",     self.BORDER),
+            ("ts", self.TXT2), ("info", self.ACCENT2), ("success", self.GREEN),
+            ("error", self.RED), ("warn", self.YELLOW), ("raw", self.ORANGE),
+            ("sep", self.BORDER), ("proto", self.TEAL),
         ]:
             self.log_text.tag_configure(tag, foreground=fg)
 
@@ -858,8 +702,7 @@ class FalconSimulator:
             port = int(pstr)
             assert 1 <= port <= 65535
         except Exception:
-            messagebox.showerror("Invalid Port",
-                                 f"Port must be 1–65535. Got: '{pstr}'")
+            messagebox.showerror("Invalid Port", f"Port must be 1–65535. Got: '{pstr}'")
             return
         if self.running:
             self._log("Server already running.", "warn")
@@ -879,9 +722,9 @@ class FalconSimulator:
             self.server_socket = None
             return
 
-        self.running       = True
-        self._bound_ip     = ip
-        self._bound_port   = port
+        self.running     = True
+        self._bound_ip   = ip
+        self._bound_port = port
         self.server_thread = threading.Thread(target=self._accept_loop, daemon=True)
         self.server_thread.start()
         self._log(f"Server started — listening on {ip}:{port}", "success")
@@ -929,9 +772,7 @@ class FalconSimulator:
             self._handle_client(conn, addr)
             self._log(f"Client disconnected: {cip}:{cport}", "warn")
             self.client_conn = None
-            self._set_dot(
-                f"●  LISTENING  {self._bound_ip}:{self._bound_port}",
-                self.GREEN)
+            self._set_dot(f"●  LISTENING  {self._bound_ip}:{self._bound_port}", self.GREEN)
 
     def _handle_client(self, conn: socket.socket, addr):
         buf = b""
@@ -954,43 +795,31 @@ class FalconSimulator:
                 except Exception:
                     raw = buf.decode("latin-1", errors="replace")
 
+                self._rx_count += 1
                 self._log("─" * 60, "sep")
                 self._log(f"Received {len(chunk)} bytes from {addr[0]}:{addr[1]}", "info")
+                self._log(f"RAW IN ↓\n{raw}", "raw")
 
-                # Parse inbound header to get extHeaderLength
-                ext_hdr = ""
-                if len(raw) >= INBOUND_FIXED_BEFORE_EXT + 4:
-                    try:
-                        ext_hdr_len_str = raw[INBOUND_FIXED_BEFORE_EXT:
-                                               INBOUND_FIXED_BEFORE_EXT + 4]
-                        # Already read in INBOUND_HEADER_FIXED as extHeaderLength field
-                        # but extHeaderLength is field index 1 (offset 9, size 4)
-                        ext_len = int(raw[9:13].strip() or "0")
-                        ext_hdr_start = INBOUND_FIXED_BEFORE_EXT
-                        ext_hdr = raw[ext_hdr_start: ext_hdr_start + ext_len]
-                        self._last_ext_hdr = ext_hdr
-                    except Exception:
-                        ext_hdr = self._last_ext_hdr
-
+                # Parse inbound header
                 hdr_d, body_d = self._parse_request(raw)
-                self.root.after(0,
-                    lambda h=hdr_d, b=body_d, r=raw:
-                        self._display_request(h, b, r))
+                self.root.after(0, lambda h=hdr_d, b=body_d, r=raw:
+                                self._display_request(h, b, r))
 
                 # Build and send response
-                echo_hdr = ext_hdr if self.echo_hdr_var.get() else ""
-                resp = self._build_response(echo_ext_hdr=echo_hdr)
-
-                self._log(f"RAW IN  (first 200): {raw[:200]!r}", "raw")
-
+                resp = self._build_response()
                 try:
                     conn.sendall(resp.encode("ascii"))
+                    self._tx_count  += 1
+                    self._bytes_sent += len(resp)
+                    self._log(f"Response sent ({len(resp)} bytes)", "success")
+                    self._log(f"RAW OUT ↓\n{resp}", "raw")
+                    # Log key header fields for quick verification
                     self._log(
-                        f"✅ Response sent — {len(resp)} bytes total  "
-                        f"(header={len(resp)-RESPONSE_BODY_SIZE}B, body={RESPONSE_BODY_SIZE}B, "
-                        f"appDataLen field='{str(RESPONSE_BODY_SIZE).zfill(9)}')",
-                        "success")
-                    self._log(f"RAW OUT (first 200): {resp[:200]!r}", "raw")
+                        f"  appDataLength={resp[0:8]}  extHdrLen={resp[8:12]}"
+                        f"  tranCode={resp[12:21]}", "proto")
+                    self.root.after(0, lambda: self.stats_var.set(
+                        f"TX: {self._tx_count}  |  RX: {self._rx_count}"
+                        f"  |  Bytes sent: {self._bytes_sent}"))
                 except Exception as ex:
                     self._log(f"Send error: {ex}", "error")
 
@@ -1004,41 +833,46 @@ class FalconSimulator:
                 pass
 
     # =========================================================================
-    # PARSE REQUEST
+    # PARSE + DISPLAY INBOUND REQUEST
     # =========================================================================
 
-    def _parse_request(self, raw: str):
+    def _parse_request(self, raw: str) -> tuple:
+        """
+        Parse inbound header using vcDBTrans25Header layout (C++ 1-based):
+          SubString(1,9)  = appDataLength      [9]
+          SubString(10,4) = extHeaderLength     [4]
+          SubString(14,9) = tranCode            [9]
+          SubString(23,10)= sourceApplication   [10]
+          SubString(33,10)= destApplication     [10]
+          SubString(43,10)= errorCode           [10]
+          SubString(53,1) = filler              [1]
+          SubString(54,N) = externalHeaderData  [N=extHeaderLen]
+          SubString(54+N,17) = RESERVED_01      [17]
+        Then body starts at: 54 + N + 17 = 71 + N
+        """
         hdr, body = {}, {}
-        min_size = INBOUND_FIXED_BEFORE_EXT
-        if len(raw) < min_size:
-            hdr["_error"] = f"Too short ({len(raw)} < {min_size} bytes)"
+        if len(raw) < 71:
+            hdr["_error"] = f"Message too short ({len(raw)} bytes)"
             return hdr, body
-
-        # Parse fixed header fields
-        pos = 0
-        for name, size in INBOUND_HEADER_FIXED:
-            hdr[name] = raw[pos: pos + size]
-            pos += size
-
-        # Read extHeaderLength to know how many bytes for externalHeaderData
         try:
-            ext_len = int(hdr.get("extHeaderLength", "0").strip() or "0")
-        except ValueError:
-            ext_len = 0
-
-        if len(raw) >= pos + ext_len:
-            hdr["externalHeaderData"] = raw[pos: pos + ext_len]
-            pos += ext_len
-        else:
-            hdr["externalHeaderData"] = raw[pos:]
-            pos = len(raw)
-
-        # RESERVED_01
-        hdr["RESERVED_01"] = raw[pos: pos + INBOUND_RESERVED_AFTER]
-        pos += INBOUND_RESERVED_AFTER
-
-        # Body
-        body = parse_fields(raw[pos:], DBTRANS25_REQUEST_FIELDS)
+            hdr["appDataLength"]         = raw[0:9]
+            hdr["extHeaderLength"]       = raw[9:13]
+            hdr["tranCode"]              = raw[13:22]
+            hdr["sourceApplication"]     = raw[22:32]
+            hdr["destinationApplication"]= raw[32:42]
+            hdr["errorCode"]             = raw[42:52]
+            hdr["filler"]               = raw[52:53]
+            try:
+                ext_len = int(raw[9:13].strip())
+            except ValueError:
+                ext_len = 0
+            hdr["externalHeaderData"] = raw[53: 53 + ext_len]
+            hdr["RESERVED_01"]        = raw[53 + ext_len: 53 + ext_len + 17]
+            body_start = 53 + ext_len + 17
+            body_raw   = raw[body_start:]
+            body = parse_fields(body_raw, DBTRANS25_REQUEST_FIELDS)
+        except Exception as ex:
+            hdr["_error"] = f"Parse error: {ex}"
         return hdr, body
 
     def _display_request(self, hdr: dict, body: dict, raw: str):
@@ -1048,35 +882,19 @@ class FalconSimulator:
         self.req_text.insert("end", f"Received: {ts}\n", "ts")
         self.req_text.insert("end", "─" * 70 + "\n", "sep")
         self.req_text.insert("end", "\n▸ INBOUND HEADER\n", "sec")
-
-        offset = 0
-        for name, size in INBOUND_HEADER_FIXED:
-            val = hdr.get(name, "")
-            self.req_text.insert("end", f"  [{offset:4d}+{size:2d}] {name:<28}", "fld")
-            self.req_text.insert("end", f"  [{val}]\n", "val")
-            offset += size
-
-        # externalHeaderData
-        ext_hdr = hdr.get("externalHeaderData", "")
-        ext_len = len(ext_hdr)
-        self.req_text.insert("end",
-            f"  [{offset:4d}+{ext_len:2d}] externalHeaderData           ", "fld")
-        self.req_text.insert("end", f"  [{ext_hdr}]\n", "val")
-        offset += ext_len
-
-        res = hdr.get("RESERVED_01", "")
-        self.req_text.insert("end",
-            f"  [{offset:4d}+17] RESERVED_01                 ", "fld")
-        self.req_text.insert("end", f"  [{res}]\n", "val")
-
+        for k, v in hdr.items():
+            if k.startswith("_"):
+                self.req_text.insert("end", f"  {v}\n", "err")
+                continue
+            self.req_text.insert("end", f"  {k:<44}", "fld")
+            self.req_text.insert("end", f"  [{v.strip()}]\n", "val")
         if body:
-            self.req_text.insert("end", "\n▸ BODY (DBTrans25)\n", "sec")
+            self.req_text.insert("end", "\n▸ BODY  (DBTrans25 Request)\n", "sec")
             for k, v in body.items():
                 self.req_text.insert("end", f"  {k:<44}", "fld")
                 self.req_text.insert("end", f"  [{v.strip()}]\n", "val")
-
-        self.req_text.insert("end", "\n─ RAW (first 300 chars) ─\n", "sep")
-        self.req_text.insert("end", raw[:300] + "\n", "raw")
+        self.req_text.insert("end", "\n─ RAW ─\n", "sep")
+        self.req_text.insert("end", raw[:2000] + ("…" if len(raw) > 2000 else "") + "\n", "raw")
         self.req_text.config(state="disabled")
         self.req_text.see("1.0")
 
@@ -1123,8 +941,8 @@ class FalconSimulator:
         if not path:
             return
         data = {
-            "resp_header": copy.deepcopy(self.active_hdr),
-            "resp_body":   copy.deepcopy(self.active_body),
+            "header":   copy.deepcopy(self.active_header),
+            "response": copy.deepcopy(self.active_response),
         }
         try:
             with open(path, "w") as f:
@@ -1148,8 +966,8 @@ class FalconSimulator:
             return
 
         for section, var_dict, active in (
-            ("resp_header", self.svars_hdr,  self.active_hdr),
-            ("resp_body",   self.svars_body, self.active_body),
+            ("header",   self.svars_header,   self.active_header),
+            ("response", self.svars_response, self.active_response),
         ):
             for k, v in data.get(section, {}).items():
                 active[k] = v
