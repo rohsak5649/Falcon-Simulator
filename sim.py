@@ -175,9 +175,17 @@ DBTRANS25_REQUEST_FIELDS = [
     ("segmentId3",                        6), ("segmentId4",                     6),
 ]
 # Derived sizes — must come AFTER DBTRANS25_REQUEST_FIELDS is defined
-INBOUND_BODY_SIZE  = sum(s for _, s in DBTRANS25_REQUEST_FIELDS)
-INBOUND_PREFIX_LEN = 2          # leading framing bytes sent by the client
-INBOUND_TOTAL_SIZE = INBOUND_PREFIX_LEN + INBOUND_HEADER_SIZE + INBOUND_BODY_SIZE
+INBOUND_BODY_SIZE        = sum(s for _, s in DBTRANS25_REQUEST_FIELDS)
+INBOUND_PREFIX_LEN       = 2    # leading framing bytes sent by the client
+# Fixed header bytes BEFORE externalHeaderData (appDataLength+extHeaderLength+tranCode+...+filler)
+INBOUND_FIXED_BEFORE_EXT = sum(s for n, s in INBOUND_HEADER_FIELDS
+                                if n not in ("externalHeaderData", "RESERVED_01"))  # 52
+# RESERVED_01 bytes that follow externalHeaderData
+INBOUND_RESERVED_SIZE    = sum(s for n, s in INBOUND_HEADER_FIELDS
+                                if n == "RESERVED_01")                               # 17
+# Default total (with extHeaderLength=20); re-computed per-message in _handle_client
+INBOUND_TOTAL_SIZE = (INBOUND_PREFIX_LEN + INBOUND_FIXED_BEFORE_EXT
+                      + 20 + INBOUND_RESERVED_SIZE + INBOUND_BODY_SIZE)
 
 # =============================================================================
 # DEFAULT RESPONSE VALUES
@@ -349,14 +357,13 @@ class FalconSimulator:
 
     def _build_response(self) -> str:
         """
-        Assemble the complete fixed-length outbound message.
-          ISO 124  =  72 bytes   (8+4+9+10+10+10+1+20)
-          ISO 125  = 969 bytes
-          ISO 126  = 100 bytes
-          Total    = 1141 bytes
-          appDataLength = 969+100 = 1069  (auto-computed, zero-padded to 8 chars)
+        Assemble the complete outbound message.
+          ISO 124 fixed part  =  8+4+9+10+10+10+1 = 52 bytes
+          externalHeaderData  =  dynamic (= inbound extHeaderLength, e.g. 20 or 28)
+          ISO 125             = 969 bytes
+          ISO 126             = 100 bytes
 
-        externalHeaderData is echoed from the inbound request (not from active124).
+        externalHeaderData and extHeaderLength are always echoed from the inbound request.
         """
         s124 = self.active124
         s125 = self.active125
@@ -366,15 +373,14 @@ class FalconSimulator:
         iso126 = "".join(fw(s126.get(n, ""), sz) for n, sz in ISO126_FIELDS)
 
         app_data  = iso125 + iso126
-        app_len_8 = str(len(app_data)).zfill(8)   # always "00001069"
+        app_len_8 = str(len(app_data)).zfill(8)
 
-        # externalHeaderData: always echo back what was received in the request
-        echo_ext_hdr = fw(self._last_external_header_data, 20)
-
-        # extHeaderLength: dynamically set to the actual content length of
-        # the received externalHeaderData (stripped of trailing spaces,
-        # zero-padded to 4 digits).  e.g. "DBTRAN251718532397" → "0018"
+        # extHeaderLength: echoed directly from inbound (zero-padded, 4 chars)
         echo_ext_hdr_len = fw(self._last_ext_header_length, 4)
+
+        # externalHeaderData: echo the EXACT bytes received from inbound.
+        # Do NOT pad/truncate to 20 — use the real captured length.
+        echo_ext_hdr = self._last_external_header_data   # exact bytes, dynamic length
 
         iso124 = (
             app_len_8 +                                                      # [8]
@@ -384,9 +390,9 @@ class FalconSimulator:
             fw(s124.get("destinationApplication", "IDFCTANGO "),      10) +   # [10]
             fw(s124.get("errorCode",              "0000000000"),      10) +   # [10]
             fw(s124.get("filler",                 " "),                1) +   # [1]
-            echo_ext_hdr                                                      # [20] echoed
+            echo_ext_hdr                                               # [dynamic] echoed
         )
-        return iso124 + app_data  # 72 + 1069 = 1141 bytes
+        return iso124 + app_data
 
     # =========================================================================
     # UI CONSTRUCTION
@@ -806,15 +812,30 @@ class FalconSimulator:
 
                 buf += chunk
 
-                # Wait until we have the complete fixed-size inbound message.
-                # INBOUND_TOTAL_SIZE = 2-byte prefix + 89-byte header + body.
-                # TCP may split one logical request across several recv() calls;
-                # we must NOT respond until every byte has arrived.
-                if len(buf) < INBOUND_TOTAL_SIZE:
+                # ── Dynamic buffer gating ────────────────────────────────────
+                # The header contains a dynamic-length externalHeaderData field.
+                # Phase 1: wait for enough bytes to read extHeaderLength (at offset 10–13
+                #          of the raw buf, i.e. prefix(2)+appDataLength(8)+extHeaderLength(4)).
+                min_to_read_ext_len = INBOUND_PREFIX_LEN + INBOUND_FIXED_BEFORE_EXT  # 54
+                if len(buf) < min_to_read_ext_len:
+                    self._log(f"Buffering… {len(buf)}/{min_to_read_ext_len}+ bytes", "info")
+                    continue
+
+                # Phase 2: parse extHeaderLength and compute actual total expected bytes.
+                ext_len_raw = buf[INBOUND_PREFIX_LEN + 8 : INBOUND_PREFIX_LEN + 8 + 4]
+                try:
+                    ext_len = int(ext_len_raw.decode("ascii", errors="replace").strip())
+                except ValueError:
+                    ext_len = 20   # safe fallback
+
+                actual_total = (INBOUND_PREFIX_LEN + INBOUND_FIXED_BEFORE_EXT
+                                + ext_len + INBOUND_RESERVED_SIZE + INBOUND_BODY_SIZE)
+
+                if len(buf) < actual_total:
                     self._log(
-                        f"Buffering… {len(buf)}/{INBOUND_TOTAL_SIZE} bytes received",
-                        "info")
-                    continue   # ← keep reading, do NOT send yet
+                        f"Buffering… {len(buf)}/{actual_total} bytes "
+                        f"(extHeaderLength={ext_len})", "info")
+                    continue   # keep reading, do NOT respond yet
 
                 # ── Full message is in buf — process exactly once ─────────────
                 # Strip leading 2-byte framing prefix before parsing.
@@ -893,13 +914,42 @@ class FalconSimulator:
     # =========================================================================
 
     def _parse_request(self, raw: str):
+        """
+        Parse the inbound ISO-124 payload.
+        externalHeaderData length is DYNAMIC — determined by the extHeaderLength field.
+        """
         hdr, body = {}, {}
-        if len(raw) < INBOUND_HEADER_SIZE:
-            hdr["_error"] = (
-                f"Message too short ({len(raw)} < {INBOUND_HEADER_SIZE})")
+
+        if len(raw) < INBOUND_FIXED_BEFORE_EXT:
+            hdr["_error"] = f"Message too short ({len(raw)} < {INBOUND_FIXED_BEFORE_EXT})"
             return hdr, body
-        hdr  = parse_fields(raw,                       INBOUND_HEADER_FIELDS)
-        body = parse_fields(raw[INBOUND_HEADER_SIZE:], DBTRANS25_REQUEST_FIELDS)
+
+        # ── Parse fixed fields before externalHeaderData (52 bytes) ─────────────
+        pos = 0
+        for name, size in INBOUND_HEADER_FIELDS:
+            if name in ("externalHeaderData", "RESERVED_01"):
+                break
+            hdr[name] = raw[pos : pos + size]
+            pos += size
+        # pos == INBOUND_FIXED_BEFORE_EXT == 52 here
+
+        # ── Read extHeaderLength to determine how many bytes follow ──────────────
+        try:
+            ext_len = int(hdr["extHeaderLength"].strip())
+        except (KeyError, ValueError):
+            ext_len = 20   # safe fallback
+
+        # ── Parse externalHeaderData with the ACTUAL dynamic length ────────────
+        hdr["externalHeaderData"] = raw[pos : pos + ext_len]
+        pos += ext_len
+
+        # ── Parse RESERVED_01 (always 17 bytes) ────────────────────────────
+        hdr["RESERVED_01"] = raw[pos : pos + INBOUND_RESERVED_SIZE]
+        pos += INBOUND_RESERVED_SIZE
+
+        # ── Parse DBTrans25 body from the remaining bytes ────────────────────
+        body = parse_fields(raw[pos:], DBTRANS25_REQUEST_FIELDS)
+
         return hdr, body
 
     def _display_request(self, hdr: dict, body: dict, raw: str):
