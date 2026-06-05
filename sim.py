@@ -18,17 +18,22 @@ import copy
 # FIELD DEFINITIONS
 # =============================================================================
 
+# FIXED: corrected inbound header field sizes to match actual incoming message
+# Old sizes were wrong (extHeaderLength=10, appDataLength=10, sourceApplication=8, etc.)
+# New correct sizes: appDataLength=8, extHeaderLength=4, sourceApplication=10,
+#                    destinationApplication=10, externalHeaderData=20
+# Total = 8+4+9+10+10+10+1+20 = 72 bytes
 INBOUND_HEADER_FIELDS = [
-    ("extHeaderLength",        10),
-    ("appDataLength",          10),
+    ("appDataLength",           8),
+    ("extHeaderLength",         4),
     ("tranCode",                9),
-    ("sourceApplication",       8),
-    ("destinationApplication",  8),
+    ("sourceApplication",      10),
+    ("destinationApplication", 10),
     ("errorCode",              10),
     ("filler",                  1),
-    ("externalHeaderData",     40),
+    ("externalHeaderData",     20),
 ]
-INBOUND_HEADER_SIZE = sum(s for _, s in INBOUND_HEADER_FIELDS)  # 96
+INBOUND_HEADER_SIZE = sum(s for _, s in INBOUND_HEADER_FIELDS)  # 72
 
 # ISO 125 outbound fields  (total = 969 bytes)
 ISO125_FIELDS = [
@@ -84,7 +89,7 @@ ISO124_FIELDS = [
     ("destinationApplication", 10),
     ("errorCode",              10),
     ("filler",                  1),
-    ("externalHeaderData",     20),
+    ("externalHeaderData",     20),   # echoed from inbound request
 ]
 
 # Inbound DBTrans25 body fields (display only)
@@ -180,7 +185,7 @@ DEFAULT_ISO124 = {
     "destinationApplication": "IDFCTANGO ",
     "errorCode":              "0000000000",
     "filler":                 " ",
-    "externalHeaderData":     "DBTRAN251718532397  ",
+    "externalHeaderData":     "DBTRAN251718532397  ",  # echoed from request at send time
 }
 
 DEFAULT_ISO125 = {
@@ -281,6 +286,10 @@ class FalconSimulator:
         self._bound_ip     = ""
         self._bound_port   = 0
 
+        # ── Last received externalHeaderData for echo-back ────────────────
+        # Updated every time a request is parsed; used in _build_response()
+        self._last_external_header_data: str = "DBTRAN251718532397  "
+
         # ── ACTIVE response dicts ─────────────────────────────────────────
         # ONLY updated by _save_response(). _build_response() reads ONLY these.
         self.active124: dict = copy.deepcopy(DEFAULT_ISO124)
@@ -328,6 +337,7 @@ class FalconSimulator:
 
     # =========================================================================
     # BUILD RESPONSE  — reads active124/125/126, never StringVars
+    # externalHeaderData is always echoed from the last received request
     # =========================================================================
 
     def _build_response(self) -> str:
@@ -338,6 +348,8 @@ class FalconSimulator:
           ISO 126  = 100 bytes
           Total    = 1141 bytes
           appDataLength = 969+100 = 1069  (auto-computed, zero-padded to 8 chars)
+
+        externalHeaderData is echoed from the inbound request (not from active124).
         """
         s124 = self.active124
         s125 = self.active125
@@ -349,6 +361,9 @@ class FalconSimulator:
         app_data  = iso125 + iso126
         app_len_8 = str(len(app_data)).zfill(8)   # always "00001069"
 
+        # externalHeaderData: always echo back what was received in the request
+        echo_ext_hdr = fw(self._last_external_header_data, 20)
+
         iso124 = (
             app_len_8 +                                                      # [8]
             fw(s124.get("extHeaderLength",        "0020"),            4) +   # [4]
@@ -357,7 +372,7 @@ class FalconSimulator:
             fw(s124.get("destinationApplication", "IDFCTANGO "),      10) +   # [10]
             fw(s124.get("errorCode",              "0000000000"),      10) +   # [10]
             fw(s124.get("filler",                 " "),                1) +   # [1]
-            fw(s124.get("externalHeaderData",     "DBTRAN251718532397  "), 20) # [20]
+            echo_ext_hdr                                                      # [20] echoed
         )
         return iso124 + app_data  # 72 + 1069 = 1141 bytes
 
@@ -503,7 +518,7 @@ class FalconSimulator:
             ("sec", self.ACCENT, True), ("fld", self.ACCENT2, False),
             ("val", self.TXT,    False), ("raw", self.YELLOW,  False),
             ("ts",  self.TXT2,   False), ("sep", self.BORDER,  False),
-            ("err", self.RED,    False),
+            ("err", self.RED,    False), ("echo", self.GREEN,  False),
         ]:
             self.req_text.tag_configure(
                 tag, foreground=fg,
@@ -522,6 +537,7 @@ class FalconSimulator:
         Scrollable field editor.
         StringVars go into var_dict.  Any change marks response as unsaved.
         appDataLength is shown read-only (auto-computed on send).
+        externalHeaderData is shown read-only (echoed from inbound request).
         """
         hf = tk.Frame(parent, bg=self.BG)
         hf.pack(fill="x", padx=8, pady=(6, 0))
@@ -577,6 +593,7 @@ class FalconSimulator:
             default_val = defaults.get(name, "")
             active_val  = active_src.get(name, default_val)
             is_auto     = (name == "appDataLength")
+            is_echo     = (name == "externalHeaderData" and var_dict is self.svars124)
 
             row = tk.Frame(inner, bg=self.PANEL)
             row.pack(fill="x", padx=2, pady=1)
@@ -591,9 +608,11 @@ class FalconSimulator:
 
             # Active value column
             tk.Label(row,
-                     text="(auto-computed)" if is_auto else repr(active_val),
+                     text="(auto-computed)" if is_auto
+                          else "(echoed from request)" if is_echo
+                          else repr(active_val),
                      bg=self.PANEL,
-                     fg=self.TXT2 if is_auto else self.GREEN,
+                     fg=self.TXT2 if (is_auto or is_echo) else self.GREEN,
                      font=("Consolas", 8), width=26, anchor="w"
                      ).pack(side="left", padx=4)
 
@@ -604,6 +623,11 @@ class FalconSimulator:
             if is_auto:
                 tk.Label(row, text="auto — always recalculated on send",
                          bg=self.PANEL, fg=self.TXT2,
+                         font=("Consolas", 9, "italic")
+                         ).pack(side="left", padx=8)
+            elif is_echo:
+                tk.Label(row, text="echoed from inbound externalHeaderData (size 20)",
+                         bg=self.PANEL, fg=self.GREEN,
                          font=("Consolas", 9, "italic")
                          ).pack(side="left", padx=8)
             else:
@@ -748,6 +772,15 @@ class FalconSimulator:
                 self._log(f"RAW IN ↓\n{raw}", "raw")
 
                 hdr_d, body_d = self._parse_request(raw)
+
+                # ── Echo-back: capture externalHeaderData from inbound header ──
+                if "externalHeaderData" in hdr_d:
+                    self._last_external_header_data = hdr_d["externalHeaderData"]
+                    self._log(
+                        f"📋  externalHeaderData captured for echo: "
+                        f"[{self._last_external_header_data}]",
+                        "info")
+
                 self.root.after(0,
                     lambda h=hdr_d, b=body_d, r=raw:
                         self._display_request(h, b, r))
@@ -795,7 +828,10 @@ class FalconSimulator:
                 self.req_text.insert("end", f"  {v}\n", "err")
                 continue
             self.req_text.insert("end", f"  {k:<44}", "fld")
-            self.req_text.insert("end", f"  [{v.strip()}]\n", "val")
+            # Highlight externalHeaderData in green to indicate it will be echoed
+            tag = "echo" if k == "externalHeaderData" else "val"
+            suffix = "  ← will be echoed in response" if k == "externalHeaderData" else ""
+            self.req_text.insert("end", f"  [{v.strip()}]{suffix}\n", tag)
         if body:
             self.req_text.insert("end", "\n▸ BODY  (DBTrans25 Request)\n", "sec")
             for k, v in body.items():
