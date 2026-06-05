@@ -21,8 +21,8 @@ import copy
 # FIXED: corrected inbound header field sizes to match actual incoming message
 # Old sizes were wrong (extHeaderLength=10, appDataLength=10, sourceApplication=8, etc.)
 # New correct sizes: appDataLength=8, extHeaderLength=4, sourceApplication=10,
-#                    destinationApplication=10, externalHeaderData=20
-# Total = 8+4+9+10+10+10+1+20 = 72 bytes
+#                    destinationApplication=10, externalHeaderData=20, RESERVED_01=17
+# Total = 8+4+9+10+10+10+1+20+17 = 89 bytes
 INBOUND_HEADER_FIELDS = [
     ("appDataLength",           8),
     ("extHeaderLength",         4),
@@ -32,8 +32,9 @@ INBOUND_HEADER_FIELDS = [
     ("errorCode",              10),
     ("filler",                  1),
     ("externalHeaderData",     20),
+    ("RESERVED_01",            17),   # ← NEW: trailing reserved bytes in inbound header
 ]
-INBOUND_HEADER_SIZE = sum(s for _, s in INBOUND_HEADER_FIELDS)  # 72
+INBOUND_HEADER_SIZE = sum(s for _, s in INBOUND_HEADER_FIELDS)  # 89
 
 # ISO 125 outbound fields  (total = 969 bytes)
 ISO125_FIELDS = [
@@ -69,7 +70,7 @@ ISO125_FIELDS = [
     ("decisionType6", 32), ("decisionCode6",  32),
     ("decisionType7", 32), ("decisionCode7",  32),
     ("decisionType8", 32), ("decisionCode8",  32),
-    ("decisionType9", 32),
+    ("decisionType9",  32),
 ]
 
 # ISO 126 outbound fields  (total = 100 bytes)
@@ -515,10 +516,11 @@ class FalconSimulator:
         self.req_text.pack(fill="both", expand=True, padx=6, pady=(2, 6))
 
         for tag, fg, bold in [
-            ("sec", self.ACCENT, True), ("fld", self.ACCENT2, False),
-            ("val", self.TXT,    False), ("raw", self.YELLOW,  False),
-            ("ts",  self.TXT2,   False), ("sep", self.BORDER,  False),
-            ("err", self.RED,    False), ("echo", self.GREEN,  False),
+            ("sec",  self.ACCENT,  True),  ("fld",  self.ACCENT2, False),
+            ("val",  self.TXT,     False),  ("raw",  self.YELLOW,  False),
+            ("ts",   self.TXT2,    False),  ("sep",  self.BORDER,  False),
+            ("err",  self.RED,     False),  ("echo", self.GREEN,   False),
+            ("resv", self.ORANGE,  False),  # tag for RESERVED_01 highlight
         ]:
             self.req_text.tag_configure(
                 tag, foreground=fg,
@@ -828,10 +830,15 @@ class FalconSimulator:
                 self.req_text.insert("end", f"  {v}\n", "err")
                 continue
             self.req_text.insert("end", f"  {k:<44}", "fld")
-            # Highlight externalHeaderData in green to indicate it will be echoed
-            tag = "echo" if k == "externalHeaderData" else "val"
-            suffix = "  ← will be echoed in response" if k == "externalHeaderData" else ""
-            self.req_text.insert("end", f"  [{v.strip()}]{suffix}\n", tag)
+            if k == "externalHeaderData":
+                self.req_text.insert(
+                    "end", f"  [{v.strip()}]  ← will be echoed in response\n", "echo")
+            elif k == "RESERVED_01":
+                # ── NEW: display RESERVED_01 with its own highlight ──────
+                self.req_text.insert(
+                    "end", f"  [{v}]  (reserved — not echoed)\n", "resv")
+            else:
+                self.req_text.insert("end", f"  [{v.strip()}]\n", "val")
         if body:
             self.req_text.insert("end", "\n▸ BODY  (DBTrans25 Request)\n", "sec")
             for k, v in body.items():
