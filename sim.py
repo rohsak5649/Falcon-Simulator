@@ -91,6 +91,7 @@ ISO124_FIELDS = [
     ("errorCode",              10),
     ("filler",                  1),
     ("externalHeaderData",     20),   # echoed from inbound request
+    ("RESERVED_01",            17),
 ]
 
 # Inbound DBTrans25 body fields (display only)
