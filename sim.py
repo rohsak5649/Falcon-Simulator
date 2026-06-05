@@ -765,13 +765,24 @@ class FalconSimulator:
                     break
 
                 buf += chunk
+
+                # ── Strip leading 2-byte framing prefix ──────────────────────
+                # The sender prepends a 2-byte (binary) length/framing header
+                # before the ISO-124 payload.  We discard those 2 bytes here so
+                # that parse_fields() sees the real message starting at byte 0.
+                prefix_hex = buf[:4].hex()   # log first 4 raw bytes for diagnostics
+                payload = buf[2:]            # actual ISO-124 content starts here
+
                 try:
-                    raw = buf.decode("ascii", errors="replace")
+                    raw = payload.decode("ascii", errors="replace")
                 except Exception:
-                    raw = buf.decode("latin-1", errors="replace")
+                    raw = payload.decode("latin-1", errors="replace")
 
                 self._log("─" * 55, "sep")
-                self._log(f"Received {len(chunk)} bytes from {addr[0]}:{addr[1]}", "info")
+                self._log(
+                    f"Received {len(chunk)} bytes from {addr[0]}:{addr[1]}"
+                    f"  |  first-4-bytes hex: {prefix_hex}"
+                    f"  |  payload size: {len(payload)}", "info")
                 self._log(f"RAW IN ↓\n{raw}", "raw")
 
                 hdr_d, body_d = self._parse_request(raw)
