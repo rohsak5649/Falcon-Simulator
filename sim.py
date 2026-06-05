@@ -763,6 +763,21 @@ class FalconSimulator:
                 break
 
             cip, cport = addr
+
+            # ── Single-connection enforcement ─────────────────────────────────
+            # Only ONE client may be connected at a time on the configured port.
+            # If a second connection arrives while one is active, reject it.
+            if self.client_conn is not None:
+                self._log(
+                    f"⛔  Rejected new connection from {cip}:{cport} "
+                    f"— already serving an active client. Only 1 connection allowed.",
+                    "warn")
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                continue
+
             self._log(f"Client connected: {cip}:{cport}", "success")
             self._set_dot(f"●  CONNECTED  {cip}:{cport}", self.ACCENT)
             self.client_conn = conn
@@ -848,11 +863,17 @@ class FalconSimulator:
                         self._display_request(h, b, r))
 
                 # ── Send exactly ONE response per complete request ─────────────
-                resp = self._build_response()
+                # Prepend the 2-byte "00" framing prefix that the Falcon plugin
+                # expects on every incoming message (mirrors the plugin-side:
+                #   strRawMessage = "00" + m_renMsg.GetTxValue(...)  )
+                resp     = self._build_response()
+                framed   = "00" + resp          # add the 2-byte prefix
                 try:
-                    conn.sendall(resp.encode("ascii"))
-                    self._log(f"✅  Response sent ({len(resp)} bytes) — 1 response per request",
-                              "success")
+                    conn.sendall(framed.encode("ascii"))
+                    self._log(
+                        f"✅  Response sent ({len(framed)} bytes, incl. 2-byte '00' prefix) "
+                        f"— 1 response per request",
+                        "success")
                     self._log(f"RAW OUT ↓\n{resp}", "raw")
                 except Exception as ex:
                     self._log(f"Send error: {ex}", "error")
