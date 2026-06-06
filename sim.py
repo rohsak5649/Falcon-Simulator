@@ -339,6 +339,30 @@ class FalconSimulator:
         self._set_save_state(True)
         self._log("✅  Response saved — next request will use updated values.", "success")
 
+    def _reset_response(self):
+        """
+        Reset ALL response fields (ISO 124 / 125 / 126) back to their
+        hardcoded DEFAULT_* values.  Both the UI StringVars and the active
+        dicts (used for sending) are restored in one step.
+        """
+        import copy
+        # ── Restore active dicts ────────────────────────────────────────────
+        self.active124 = copy.deepcopy(DEFAULT_ISO124)
+        self.active125 = copy.deepcopy(DEFAULT_ISO125)
+        self.active126 = copy.deepcopy(DEFAULT_ISO126)
+
+        # ── Update every StringVar so the UI reflects the reset values ─────
+        for default, svars in (
+            (DEFAULT_ISO124, self.svars124),
+            (DEFAULT_ISO125, self.svars125),
+            (DEFAULT_ISO126, self.svars126),
+        ):
+            for key, var in svars.items():
+                var.set(default.get(key, ""))
+
+        self._set_save_state(True)
+        self._log("🔄  Response reset to defaults — all fields restored.", "warn")
+
     def _set_save_state(self, saved: bool):
         if saved:
             self.save_indicator.config(text="● saved", fg=self.GREEN)
@@ -461,6 +485,10 @@ class FalconSimulator:
         # Save Response — the main action button
         self.save_resp_btn = btn("✅  Save Response", self._save_response, "#40a02b")
         self.save_resp_btn.pack(side="right", padx=6)
+
+        # Reset — restore all fields to defaults
+        btn("🔄  Reset", self._reset_response, self.CARD, fg=self.YELLOW
+            ).pack(side="right", padx=4)
 
         self.save_indicator = tk.Label(ctrl, text="● saved", fg=self.GREEN,
                                        bg=self.PANEL,
