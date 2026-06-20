@@ -32,7 +32,7 @@ INBOUND_HEADER_FIELDS = [
     ("errorCode",              10),
     ("filler",                  1),
     ("externalHeaderData",     20),
-    ("RESERVED_01",            17),   # ← NEW: trailing reserved bytes in inbound header
+    ("RESERVED_01",            17),   # trailing reserved bytes in inbound header
 ]
 INBOUND_HEADER_SIZE = sum(s for _, s in INBOUND_HEADER_FIELDS)  # 89
 
@@ -93,6 +93,51 @@ ISO124_FIELDS = [
     ("externalHeaderData",     20),   # echoed from inbound request
     ("RESERVED_01",            17),
 ]
+
+# =============================================================================
+# EXT10 FIELD DEFINITIONS
+# =============================================================================
+
+# Inbound EXT10 request body fields
+EXT10_REQUEST_FIELDS = [
+    ("workflow",                      16), ("recordType",                  8),
+    ("dataSpecificationVersion",       5), ("clientIdFromHeader",         16),
+    ("recordCreationDate",             8), ("recordCreationTime",          6),
+    ("recordCreationMilliseconds",     3), ("gmtOffset",                   6),
+    ("customerIdFromHeader",          20), ("customerAcctNumber",         40),
+    ("externalTransactionId",         32), ("serviceId",                  19),
+    ("transactionDate",                8), ("transactionTime",             6),
+    ("validity",                       4), ("entityType",                  4),
+    ("extSource",                     48), ("notificationName",           48),
+    ("notificationStatus",            10),
+    ("score1",   4), ("score2",   4), ("score3",   4),
+    ("userData01",  4), ("userData02",  4), ("userData03",  4), ("userData04",  4),
+    ("userData05",  4), ("userData06",  8), ("userData07",  8), ("userData08",  8),
+    ("userData09",  8), ("userData10",  8), ("userData11",  8),
+    ("userData12", 16), ("userData13", 16), ("userData14", 16), ("userData15", 16),
+    ("userData16", 16), ("userData17", 16),
+    ("userData18", 32), ("userData19", 32), ("userData20", 32), ("userData21", 32),
+    ("userData22", 32), ("userData23", 32), ("userData24", 32), ("userData25", 32),
+    ("userData26", 32), ("userData27", 32),
+    ("userData28", 64), ("userData29", 64), ("userData30", 64), ("userData31", 64),
+    ("userData32", 64),
+    ("userData33", 255), ("userData34", 255),
+]
+
+# EXT10 response body fields
+EXT10_RESPONSE_FIELDS = [
+    ("workflow",                      16), ("recordType",                  8),
+    ("dataSpecificationVersion",       5), ("clientIdFromHeader",         16),
+    ("recordCreationDate",             8), ("recordCreationTime",          6),
+    ("recordCreationMilliseconds",     3), ("gmtOffset",                   6),
+    ("customerIdFromHeader",          20), ("customerAcctNumber",         40),
+    ("externalTransactionId",         32), ("Response",                    2),
+]
+EXT10_RESPONSE_BODY_SIZE = sum(s for _, s in EXT10_RESPONSE_FIELDS)  # 162
+
+# =============================================================================
+# DBTRANS25 REQUEST FIELDS
+# =============================================================================
 
 # Inbound DBTrans25 body fields (display only)
 DBTRANS25_REQUEST_FIELDS = [
@@ -174,7 +219,8 @@ DBTRANS25_REQUEST_FIELDS = [
     ("segmentId1",                        6), ("segmentId2",                     6),
     ("segmentId3",                        6), ("segmentId4",                     6),
 ]
-# Derived sizes — must come AFTER DBTRANS25_REQUEST_FIELDS is defined
+
+# Derived sizes — must come AFTER field lists are defined
 INBOUND_BODY_SIZE        = sum(s for _, s in DBTRANS25_REQUEST_FIELDS)
 INBOUND_PREFIX_LEN       = 2    # leading framing bytes sent by the client
 # Fixed header bytes BEFORE externalHeaderData (appDataLength+extHeaderLength+tranCode+...+filler)
@@ -187,8 +233,13 @@ INBOUND_RESERVED_SIZE    = sum(s for n, s in INBOUND_HEADER_FIELDS
 INBOUND_TOTAL_SIZE = (INBOUND_PREFIX_LEN + INBOUND_FIXED_BEFORE_EXT
                       + 20 + INBOUND_RESERVED_SIZE + INBOUND_BODY_SIZE)
 
+# tranCode prefixes used to distinguish request types
+# Adjust TRANCODE_EXT10 if your actual EXT10 tranCode differs
+TRANCODE_DBTRAN25 = "100000101"
+TRANCODE_EXT10    = "100000110"
+
 # =============================================================================
-# DEFAULT RESPONSE VALUES
+# DEFAULT RESPONSE VALUES — DBTRAN25
 # =============================================================================
 
 DEFAULT_ISO124 = {
@@ -244,6 +295,25 @@ DEFAULT_ISO126 = {
     "decisionType10":  " " * 32,
     "decisionCode10":  " " * 32,
     "scoringServerID": "    ",
+}
+
+# =============================================================================
+# DEFAULT RESPONSE VALUES — EXT10
+# =============================================================================
+
+DEFAULT_EXT10_RESPONSE = {
+    "workflow":                   " " * 16,
+    "recordType":                 " " * 8,
+    "dataSpecificationVersion":   "00001",
+    "clientIdFromHeader":         " " * 16,
+    "recordCreationDate":         " " * 8,
+    "recordCreationTime":         " " * 6,
+    "recordCreationMilliseconds": " " * 3,
+    "gmtOffset":                  " " * 6,
+    "customerIdFromHeader":       " " * 20,
+    "customerAcctNumber":         " " * 40,
+    "externalTransactionId":      " " * 32,
+    "Response":                   "00",      # 2 bytes — "00" = success
 }
 
 # =============================================================================
@@ -305,16 +375,22 @@ class FalconSimulator:
         self._last_external_header_data: str = "DBTRAN251718532397  "
         self._last_ext_header_length:    str = "0020"   # echoed dynamically from request
 
-        # ── ACTIVE response dicts ─────────────────────────────────────────
-        # ONLY updated by _save_response(). _build_response() reads ONLY these.
-        self.active124: dict = copy.deepcopy(DEFAULT_ISO124)
-        self.active125: dict = copy.deepcopy(DEFAULT_ISO125)
-        self.active126: dict = copy.deepcopy(DEFAULT_ISO126)
+        # ── Last detected request type ────────────────────────────────────────
+        # "DBTRAN25" or "EXT10" — set in _handle_client, read in _build_response
+        self._last_request_type: str = "DBTRAN25"
 
-        # ── UI StringVar dicts (live editing, NOT used for sending) ───────
-        self.svars124: dict = {}
-        self.svars125: dict = {}
-        self.svars126: dict = {}
+        # ── ACTIVE response dicts ─────────────────────────────────────────────
+        # ONLY updated by _save_response(). _build_response() reads ONLY these.
+        self.active124:         dict = copy.deepcopy(DEFAULT_ISO124)
+        self.active125:         dict = copy.deepcopy(DEFAULT_ISO125)
+        self.active126:         dict = copy.deepcopy(DEFAULT_ISO126)
+        self.active_ext10_resp: dict = copy.deepcopy(DEFAULT_EXT10_RESPONSE)
+
+        # ── UI StringVar dicts (live editing, NOT used for sending) ───────────
+        self.svars124:         dict = {}
+        self.svars125:         dict = {}
+        self.svars126:         dict = {}
+        self.svars_ext10_resp: dict = {}
 
         self._build_ui()
         self._poll_log()
@@ -329,9 +405,10 @@ class FalconSimulator:
         _build_response() will use these values for the next send.
         """
         for svars, active in (
-            (self.svars124, self.active124),
-            (self.svars125, self.active125),
-            (self.svars126, self.active126),
+            (self.svars124,         self.active124),
+            (self.svars125,         self.active125),
+            (self.svars126,         self.active126),
+            (self.svars_ext10_resp, self.active_ext10_resp),
         ):
             for key, var in svars.items():
                 active[key] = var.get()
@@ -341,21 +418,22 @@ class FalconSimulator:
 
     def _reset_response(self):
         """
-        Reset ALL response fields (ISO 124 / 125 / 126) back to their
+        Reset ALL response fields (ISO 124 / 125 / 126 + EXT10) back to their
         hardcoded DEFAULT_* values.  Both the UI StringVars and the active
         dicts (used for sending) are restored in one step.
         """
-        import copy
-        # ── Restore active dicts ────────────────────────────────────────────
-        self.active124 = copy.deepcopy(DEFAULT_ISO124)
-        self.active125 = copy.deepcopy(DEFAULT_ISO125)
-        self.active126 = copy.deepcopy(DEFAULT_ISO126)
+        # ── Restore active dicts ──────────────────────────────────────────────
+        self.active124          = copy.deepcopy(DEFAULT_ISO124)
+        self.active125          = copy.deepcopy(DEFAULT_ISO125)
+        self.active126          = copy.deepcopy(DEFAULT_ISO126)
+        self.active_ext10_resp  = copy.deepcopy(DEFAULT_EXT10_RESPONSE)
 
-        # ── Update every StringVar so the UI reflects the reset values ─────
+        # ── Update every StringVar so the UI reflects the reset values ────────
         for default, svars in (
-            (DEFAULT_ISO124, self.svars124),
-            (DEFAULT_ISO125, self.svars125),
-            (DEFAULT_ISO126, self.svars126),
+            (DEFAULT_ISO124,         self.svars124),
+            (DEFAULT_ISO125,         self.svars125),
+            (DEFAULT_ISO126,         self.svars126),
+            (DEFAULT_EXT10_RESPONSE, self.svars_ext10_resp),
         ):
             for key, var in svars.items():
                 var.set(default.get(key, ""))
@@ -375,20 +453,53 @@ class FalconSimulator:
         self._set_save_state(False)
 
     # =========================================================================
-    # BUILD RESPONSE  — reads active124/125/126, never StringVars
-    # externalHeaderData is always echoed from the last received request
+    # BUILD RESPONSE
     # =========================================================================
 
     def _build_response(self) -> str:
         """
         Assemble the complete outbound message.
-          ISO 124 fixed part  =  8+4+9+10+10+10+1 = 52 bytes
-          externalHeaderData  =  dynamic (= inbound extHeaderLength, e.g. 20 or 28)
-          ISO 125             = 969 bytes
-          ISO 126             = 100 bytes
+
+        If the last received request was EXT10:
+          → Build an EXT10 response (ISO-124 header + EXT10 body, 162 bytes).
+          → Response body is built from EXT10_RESPONSE_FIELDS + active_ext10_resp.
+          → The first 11 fields (workflow … externalTransactionId) are echoed
+            verbatim from the inbound EXT10 request body.
+          → Only 'Response' (2 bytes, default "00") is user-configurable.
+
+        Otherwise (DBTran25):
+          → ISO 124 fixed part  = 8+4+9+10+10+10+1 = 52 bytes
+          → externalHeaderData  = dynamic (= inbound extHeaderLength, e.g. 20 or 28)
+          → ISO 125             = 969 bytes
+          → ISO 126             = 100 bytes
 
         externalHeaderData and extHeaderLength are always echoed from the inbound request.
         """
+        # extHeaderLength: echoed directly from inbound (zero-padded, 4 chars)
+        echo_ext_hdr_len = fw(self._last_ext_header_length, 4)
+        # externalHeaderData: echo the EXACT bytes received from inbound.
+        echo_ext_hdr = self._last_external_header_data   # exact bytes, dynamic length
+
+        if self._last_request_type == "EXT10":
+            # ── EXT10 response ────────────────────────────────────────────────
+            resp_body = self.active_ext10_resp
+            body_str  = "".join(fw(resp_body.get(n, ""), sz) for n, sz in EXT10_RESPONSE_FIELDS)
+            app_len_8 = str(len(body_str)).zfill(8)
+
+            s124 = self.active124
+            iso124 = (
+                app_len_8 +
+                echo_ext_hdr_len +
+                fw(s124.get("tranCode",               "200000110"), 9) +
+                fw(s124.get("sourceApplication",      "PMAX      "), 10) +
+                fw(s124.get("destinationApplication", "IDFCTANGO "), 10) +
+                fw(s124.get("errorCode",              "0000000000"), 10) +
+                fw(s124.get("filler",                 " "),          1) +
+                echo_ext_hdr
+            )
+            return iso124 + body_str
+
+        # ── DBTran25 response (original path, unchanged) ──────────────────────
         s124 = self.active124
         s125 = self.active125
         s126 = self.active126
@@ -398,13 +509,6 @@ class FalconSimulator:
 
         app_data  = iso125 + iso126
         app_len_8 = str(len(app_data)).zfill(8)
-
-        # extHeaderLength: echoed directly from inbound (zero-padded, 4 chars)
-        echo_ext_hdr_len = fw(self._last_ext_header_length, 4)
-
-        # externalHeaderData: echo the EXACT bytes received from inbound.
-        # Do NOT pad/truncate to 20 — use the real captured length.
-        echo_ext_hdr = self._last_external_header_data   # exact bytes, dynamic length
 
         iso124 = (
             app_len_8 +                                                      # [8]
@@ -425,7 +529,7 @@ class FalconSimulator:
     def _build_ui(self):
         self._apply_styles()
 
-        # ── Banner ────────────────────────────────────────────────────────
+        # ── Banner ────────────────────────────────────────────────────────────
         banner = tk.Frame(self.root, bg="#11111b", height=52)
         banner.pack(fill="x")
         banner.pack_propagate(False)
@@ -440,7 +544,7 @@ class FalconSimulator:
                             font=("Consolas", 11, "bold"))
         self.dot.pack(side="right", padx=20)
 
-        # ── Control bar ───────────────────────────────────────────────────
+        # ── Control bar ───────────────────────────────────────────────────────
         ctrl = tk.Frame(self.root, bg=self.PANEL, height=58)
         ctrl.pack(fill="x")
         ctrl.pack_propagate(False)
@@ -495,7 +599,7 @@ class FalconSimulator:
                                        font=("Consolas", 9, "bold"))
         self.save_indicator.pack(side="right", padx=(0, 2))
 
-        # ── Main paned area ───────────────────────────────────────────────
+        # ── Main paned area ───────────────────────────────────────────────────
         pane = tk.PanedWindow(self.root, orient="horizontal",
                               bg=self.BG, sashwidth=5, sashrelief="flat")
         pane.pack(fill="both", expand=True)
@@ -526,6 +630,11 @@ class FalconSimulator:
         nb.add(t3, text="  ISO 126 (Decision overflow)  ")
         self._build_editor_tab(t3, "ISO 126 — Decision Code 9 + Decision 10 + Scoring Server ID",
                                DEFAULT_ISO126, ISO126_FIELDS, self.svars126)
+
+        # ── EXT10 response editor tab ─────────────────────────────────────────
+        t4 = tk.Frame(nb, bg=self.BG)
+        nb.add(t4, text="  🔷 EXT10 Response  ")
+        self._build_ext10_editor_tab(t4)
 
         self._build_log_panel(right)
 
@@ -633,8 +742,10 @@ class FalconSimulator:
             active_src = self.active124
         elif var_dict is self.svars125:
             active_src = self.active125
-        else:
+        elif var_dict is self.svars126:
             active_src = self.active126
+        else:
+            active_src = self.active_ext10_resp
 
         for name, size in fields:
             default_val = defaults.get(name, "")
@@ -693,6 +804,107 @@ class FalconSimulator:
                          ).pack(side="left", padx=8)
             else:
                 # Attach change callback AFTER StringVar is created
+                var.trace_add("write", self._on_field_changed)
+                tk.Entry(row, textvariable=var,
+                         bg=self.CARD, fg=self.TXT,
+                         insertbackground=self.TXT, relief="flat",
+                         font=("Consolas", 9), width=60
+                         ).pack(side="left", padx=4, pady=2,
+                                fill="x", expand=True)
+
+    # ── EXT10 response editor tab ─────────────────────────────────────────────
+
+    def _build_ext10_editor_tab(self, parent):
+        """
+        Dedicated editor for EXT10 response body fields.
+        Identical UX to _build_editor_tab but targets EXT10_RESPONSE_FIELDS
+        and self.svars_ext10_resp / self.active_ext10_resp.
+        """
+        hf = tk.Frame(parent, bg=self.BG)
+        hf.pack(fill="x", padx=8, pady=(6, 0))
+        tk.Label(hf,
+                 text="EXT10 Response Body — sent automatically when an EXT10 request is received",
+                 bg=self.BG, fg=self.ACCENT,
+                 font=("Consolas", 10, "bold")).pack(side="left")
+
+        note = tk.Frame(parent, bg="#2a2a3e", pady=4)
+        note.pack(fill="x", padx=8, pady=(2, 6))
+        tk.Label(note,
+                 text="  ✏  Edit 'Response' value, then click  ✅ Save Response  to apply."
+                      "  All other fields are echoed from the inbound EXT10 request.",
+                 bg="#2a2a3e", fg=self.YELLOW, font=("Consolas", 9)
+                 ).pack(side="left")
+
+        canvas = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
+        sb     = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(fill="both", expand=True, padx=6, pady=2)
+
+        inner  = tk.Frame(canvas, bg=self.BG)
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _resize(e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfig(win_id, width=canvas.winfo_width())
+
+        inner.bind("<Configure>", _resize)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
+        canvas.bind("<MouseWheel>",
+                    lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        canvas.bind("<Button-5>", lambda e: canvas.yview_scroll( 1, "units"))
+
+        # Column headers
+        hdr = tk.Frame(inner, bg=self.CARD)
+        hdr.pack(fill="x", padx=2, pady=(2, 1))
+        for col, w in [("Field Name", 32), ("Size", 6),
+                       ("Active (sent)", 26), ("Edit value", 0)]:
+            tk.Label(hdr, text=col, bg=self.CARD, fg=self.ACCENT,
+                     font=("Consolas", 9, "bold"), width=w,
+                     anchor="w").pack(side="left", padx=6, pady=3)
+
+        # Fields auto-echoed verbatim from the EXT10 request body
+        ECHOED_FROM_REQUEST = {
+            "workflow", "recordType", "dataSpecificationVersion",
+            "clientIdFromHeader", "recordCreationDate", "recordCreationTime",
+            "recordCreationMilliseconds", "gmtOffset",
+            "customerIdFromHeader", "customerAcctNumber", "externalTransactionId",
+        }
+
+        for name, size in EXT10_RESPONSE_FIELDS:
+            default_val = DEFAULT_EXT10_RESPONSE.get(name, "")
+            active_val  = self.active_ext10_resp.get(name, default_val)
+            is_echo     = name in ECHOED_FROM_REQUEST
+
+            row = tk.Frame(inner, bg=self.PANEL)
+            row.pack(fill="x", padx=2, pady=1)
+
+            tk.Label(row, text=name, bg=self.PANEL, fg=self.ACCENT2,
+                     font=("Consolas", 9), width=32, anchor="w"
+                     ).pack(side="left", padx=6)
+
+            tk.Label(row, text="echo" if is_echo else str(size),
+                     bg=self.PANEL, fg=self.TXT2,
+                     font=("Consolas", 9), width=6, anchor="w"
+                     ).pack(side="left", padx=2)
+
+            tk.Label(row,
+                     text="(echoed from request)" if is_echo else repr(active_val),
+                     bg=self.PANEL,
+                     fg=self.TXT2 if is_echo else self.GREEN,
+                     font=("Consolas", 8), width=26, anchor="w"
+                     ).pack(side="left", padx=4)
+
+            var = tk.StringVar(value=str(default_val))
+            self.svars_ext10_resp[name] = var
+
+            if is_echo:
+                tk.Label(row, text="echoed from EXT10 request body (auto)",
+                         bg=self.PANEL, fg=self.GREEN,
+                         font=("Consolas", 9, "italic")
+                         ).pack(side="left", padx=8)
+            else:
                 var.trace_add("write", self._on_field_changed)
                 tk.Entry(row, textvariable=var,
                          bg=self.CARD, fg=self.TXT,
@@ -798,7 +1010,7 @@ class FalconSimulator:
 
             cip, cport = addr
 
-            # ── Single-connection enforcement ─────────────────────────────────
+            # ── Single-connection enforcement ──────────────────────────────────
             # Only ONE client may be connected at a time on the configured port.
             # If a second connection arrives while one is active, reject it.
             if self.client_conn is not None:
@@ -827,7 +1039,7 @@ class FalconSimulator:
         conn.settimeout(120.0)
         try:
             while self.running:
-                # ── Receive chunks until the full message is buffered ─────────
+                # ── Receive chunks until the full message is buffered ──────────
                 try:
                     chunk = conn.recv(4096)
                 except socket.timeout:
@@ -865,7 +1077,7 @@ class FalconSimulator:
                         f"(extHeaderLength={ext_len})", "info")
                     continue   # keep reading, do NOT respond yet
 
-                # ── Full message is in buf — process exactly once ─────────────
+                # ── Full message is in buf — process exactly once ──────────────
                 # Strip leading 2-byte framing prefix before parsing.
                 prefix_hex = buf[:4].hex()   # diagnostic: log the raw prefix
                 payload = buf[2:]            # actual ISO-124 content starts here
@@ -883,6 +1095,16 @@ class FalconSimulator:
                 self._log(f"RAW IN ↓\n{raw}", "raw")
 
                 hdr_d, body_d = self._parse_request(raw, ext_len)
+
+                # ── Detect request type from tranCode ────────────────────────
+                tran_raw = hdr_d.get("tranCode", "").strip()
+                if tran_raw.startswith("100000110") or "EXT10" in tran_raw.upper():
+                    self._last_request_type = "EXT10"
+                else:
+                    self._last_request_type = "DBTRAN25"
+                self._log(
+                    f"🏷  Request type detected: {self._last_request_type}  "
+                    f"(tranCode=[{tran_raw}])", "info")
 
                 # ── Echo-back: capture externalHeaderData + extHeaderLength ──
                 # Read externalHeaderData (echoed verbatim in response)
@@ -906,6 +1128,17 @@ class FalconSimulator:
                         f"→  will echo [{self._last_ext_header_length}]",
                         "info")
 
+                # ── If EXT10: echo header fields from request into active response ─
+                if self._last_request_type == "EXT10" and body_d:
+                    ECHO_FIELDS = [
+                        "workflow", "recordType", "dataSpecificationVersion",
+                        "clientIdFromHeader", "recordCreationDate", "recordCreationTime",
+                        "recordCreationMilliseconds", "gmtOffset",
+                        "customerIdFromHeader", "customerAcctNumber", "externalTransactionId",
+                    ]
+                    for ef in ECHO_FIELDS:
+                        if ef in body_d:
+                            self.active_ext10_resp[ef] = body_d[ef]
 
                 self.root.after(0,
                     lambda h=hdr_d, b=body_d, r=raw:
@@ -920,7 +1153,8 @@ class FalconSimulator:
                 try:
                     conn.sendall(framed.encode("ascii"))
                     self._log(
-                        f"✅  Response sent ({len(framed)} bytes, incl. 2-byte '00' prefix) "
+                        f"✅  {self._last_request_type} Response sent "
+                        f"({len(framed)} bytes, incl. 2-byte '00' prefix) "
                         f"— 1 response per request",
                         "success")
                     self._log(f"RAW OUT ↓\n{resp}", "raw")
@@ -999,8 +1233,12 @@ class FalconSimulator:
             )
             return hdr, body
 
-        # ── 5) Parse DBTrans25 body from the correct offset ────────────────────
-        body = parse_fields(raw[body_start:], DBTRANS25_REQUEST_FIELDS)
+        # ── 5) Parse body from the correct offset — choose fields by tranCode ──
+        tran_for_parse = hdr.get("tranCode", "").strip()
+        if tran_for_parse.startswith("100000110") or "EXT10" in tran_for_parse.upper():
+            body = parse_fields(raw[body_start:], EXT10_REQUEST_FIELDS)
+        else:
+            body = parse_fields(raw[body_start:], DBTRANS25_REQUEST_FIELDS)
 
         return hdr, body
 
@@ -1034,9 +1272,11 @@ class FalconSimulator:
             except (ValueError, AttributeError):
                 _ext_diag = 20
             _bstart = INBOUND_FIXED_BEFORE_EXT + _ext_diag + INBOUND_RESERVED_SIZE
+            # Determine body label from request type
+            _rtype = self._last_request_type
             self.req_text.insert(
                 "end",
-                f"\n▸ BODY  (DBTrans25 Request)"
+                f"\n▸ BODY  ({_rtype} Request)"
                 f"  — raw byte offset {_bstart}"
                 f"  (fixed={INBOUND_FIXED_BEFORE_EXT}"
                 f" + extLen={_ext_diag}"
@@ -1094,9 +1334,10 @@ class FalconSimulator:
         if not path:
             return
         data = {
-            "iso124": copy.deepcopy(self.active124),
-            "iso125": copy.deepcopy(self.active125),
-            "iso126": copy.deepcopy(self.active126),
+            "iso124":         copy.deepcopy(self.active124),
+            "iso125":         copy.deepcopy(self.active125),
+            "iso126":         copy.deepcopy(self.active126),
+            "ext10_response": copy.deepcopy(self.active_ext10_resp),
         }
         try:
             with open(path, "w") as f:
@@ -1120,9 +1361,10 @@ class FalconSimulator:
             return
 
         for section, var_dict, active in (
-            ("iso124", self.svars124, self.active124),
-            ("iso125", self.svars125, self.active125),
-            ("iso126", self.svars126, self.active126),
+            ("iso124",         self.svars124,          self.active124),
+            ("iso125",         self.svars125,          self.active125),
+            ("iso126",         self.svars126,          self.active126),
+            ("ext10_response", self.svars_ext10_resp,  self.active_ext10_resp),
         ):
             for k, v in data.get(section, {}).items():
                 active[k] = v           # commit immediately
