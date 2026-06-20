@@ -882,7 +882,7 @@ class FalconSimulator:
                     f"  |  prefix hex: {prefix_hex}", "info")
                 self._log(f"RAW IN ↓\n{raw}", "raw")
 
-                hdr_d, body_d = self._parse_request(raw)
+                hdr_d, body_d = self._parse_request(raw, ext_len)
 
                 # ── Echo-back: capture externalHeaderData + extHeaderLength ──
                 # Read externalHeaderData (echoed verbatim in response)
@@ -941,10 +941,19 @@ class FalconSimulator:
     # PARSE + DISPLAY REQUEST
     # =========================================================================
 
-    def _parse_request(self, raw: str):
+    def _parse_request(self, raw: str, ext_len: int = 20):
         """
         Parse the inbound ISO-124 payload.
-        externalHeaderData length is DYNAMIC — determined by the extHeaderLength field.
+
+        ext_len: actual externalHeaderData byte count, pre-computed in _handle_client
+                 from the extHeaderLength field of the BUFFERED bytes.  Passing it
+                 as a parameter guarantees the header-parser and body-parser always
+                 agree on the split point, regardless of any decoding edge-cases.
+
+        body_start is computed EXPLICITLY:
+            INBOUND_FIXED_BEFORE_EXT  (52)   — fixed header fields
+          + ext_len                           — dynamic externalHeaderData
+          + INBOUND_RESERVED_SIZE     (17)   — RESERVED_01
         """
         hdr, body = {}, {}
 
@@ -952,31 +961,46 @@ class FalconSimulator:
             hdr["_error"] = f"Message too short ({len(raw)} < {INBOUND_FIXED_BEFORE_EXT})"
             return hdr, body
 
-        # ── Parse fixed fields before externalHeaderData (52 bytes) ─────────────
+        # ── 1) Parse fixed header fields before externalHeaderData (52 bytes) ──
         pos = 0
         for name, size in INBOUND_HEADER_FIELDS:
             if name in ("externalHeaderData", "RESERVED_01"):
                 break
             hdr[name] = raw[pos : pos + size]
             pos += size
-        # pos == INBOUND_FIXED_BEFORE_EXT == 52 here
+        # pos should equal INBOUND_FIXED_BEFORE_EXT (52) here
 
-        # ── Read extHeaderLength to determine how many bytes follow ──────────────
-        try:
-            ext_len = int(hdr["extHeaderLength"].strip())
-        except (KeyError, ValueError):
-            ext_len = 20   # safe fallback
-
-        # ── Parse externalHeaderData with the ACTUAL dynamic length ────────────
+        # ── 2) Parse externalHeaderData using the passed ext_len ───────────────
         hdr["externalHeaderData"] = raw[pos : pos + ext_len]
         pos += ext_len
 
-        # ── Parse RESERVED_01 (always 17 bytes) ────────────────────────────
+        # ── 3) Parse RESERVED_01 (always INBOUND_RESERVED_SIZE = 17 bytes) ─────
         hdr["RESERVED_01"] = raw[pos : pos + INBOUND_RESERVED_SIZE]
         pos += INBOUND_RESERVED_SIZE
 
-        # ── Parse DBTrans25 body from the remaining bytes ────────────────────
-        body = parse_fields(raw[pos:], DBTRANS25_REQUEST_FIELDS)
+        # ── 4) Compute body start position EXPLICITLY ──────────────────────────
+        # This is independent of the accumulated pos above, so any subtle
+        # discrepancy in the header-loop cannot misplace the body.
+        body_start = INBOUND_FIXED_BEFORE_EXT + ext_len + INBOUND_RESERVED_SIZE
+
+        self._log(
+            f"🔍  Parse offsets — fixed_hdr={INBOUND_FIXED_BEFORE_EXT}"
+            f"  ext_len={ext_len}"
+            f"  reserved={INBOUND_RESERVED_SIZE}"
+            f"  body_start={body_start}"
+            f"  raw_len={len(raw)}",
+            "info"
+        )
+
+        if body_start > len(raw):
+            hdr["_warn"] = (
+                f"body_start ({body_start}) > raw length ({len(raw)}); "
+                "body will be empty — message may be truncated"
+            )
+            return hdr, body
+
+        # ── 5) Parse DBTrans25 body from the correct offset ────────────────────
+        body = parse_fields(raw[body_start:], DBTRANS25_REQUEST_FIELDS)
 
         return hdr, body
 
@@ -987,25 +1011,41 @@ class FalconSimulator:
         self.req_text.insert("end", f"Received: {ts}\n", "ts")
         self.req_text.insert("end", "─" * 70 + "\n", "sep")
         self.req_text.insert("end", "\n▸ HEADER  (ISO 124 incoming)\n", "sec")
+
         for k, v in hdr.items():
             if k.startswith("_"):
-                self.req_text.insert("end", f"  {v}\n", "err")
+                tag = "err" if k == "_error" else "warn"
+                self.req_text.insert("end", f"  ⚠  {v}\n", tag)
                 continue
             self.req_text.insert("end", f"  {k:<44}", "fld")
             if k == "externalHeaderData":
                 self.req_text.insert(
                     "end", f"  [{v.strip()}]  ← will be echoed in response\n", "echo")
             elif k == "RESERVED_01":
-                # ── NEW: display RESERVED_01 with its own highlight ──────
                 self.req_text.insert(
                     "end", f"  [{v}]  (reserved — not echoed)\n", "resv")
             else:
                 self.req_text.insert("end", f"  [{v.strip()}]\n", "val")
+
         if body:
-            self.req_text.insert("end", "\n▸ BODY  (DBTrans25 Request)\n", "sec")
+            # Compute body_start for the diagnostic label
+            try:
+                _ext_diag = int(hdr.get("extHeaderLength", "20").strip())
+            except (ValueError, AttributeError):
+                _ext_diag = 20
+            _bstart = INBOUND_FIXED_BEFORE_EXT + _ext_diag + INBOUND_RESERVED_SIZE
+            self.req_text.insert(
+                "end",
+                f"\n▸ BODY  (DBTrans25 Request)"
+                f"  — raw byte offset {_bstart}"
+                f"  (fixed={INBOUND_FIXED_BEFORE_EXT}"
+                f" + extLen={_ext_diag}"
+                f" + reserved={INBOUND_RESERVED_SIZE})\n",
+                "sec")
             for k, v in body.items():
                 self.req_text.insert("end", f"  {k:<44}", "fld")
                 self.req_text.insert("end", f"  [{v.strip()}]\n", "val")
+
         self.req_text.insert("end", "\n─ RAW ─\n", "sep")
         self.req_text.insert("end", raw + "\n", "raw")
         self.req_text.config(state="disabled")
