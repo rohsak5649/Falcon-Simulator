@@ -7,6 +7,7 @@ Internal Tool — IDFC First Bank / Euronet Integration
 
 import socket
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import datetime
@@ -370,6 +371,9 @@ class FalconSimulator:
         self._bound_ip     = ""
         self._bound_port   = 0
 
+        # ── Response delay (seconds) — 0 = immediate ──────────────────────────
+        self.response_delay_seconds: float = 0.0
+
         # ── Last received externalHeaderData + extHeaderLength for echo-back ─
         # Updated every time a request is parsed; used in _build_response()
         self._last_external_header_data: str = "DBTRAN251718532397  "
@@ -440,6 +444,38 @@ class FalconSimulator:
 
         self._set_save_state(True)
         self._log("🔄  Response reset to defaults — all fields restored.", "warn")
+
+    def _apply_delay(self):
+        """Read the delay Entry, validate, and store in self.response_delay_seconds."""
+        raw = self.delay_var.get().strip()
+        try:
+            val = float(raw)
+            if val < 0:
+                raise ValueError("negative")
+        except ValueError:
+            # Reset Entry to last good value
+            self.delay_var.set(f"{self.response_delay_seconds:g}")
+            messagebox.showwarning(
+                "Invalid Delay",
+                f"Please enter a non-negative number (e.g. 0, 1, 2.5).\nGot: '{raw}'")
+            return
+        self.response_delay_seconds = val
+        if val == 0:
+            self._delay_indicator.config(text="INSTANT", fg=self.GREEN)
+        else:
+            self._delay_indicator.config(
+                text=f"{val:g}s delay", fg=self.YELLOW)
+        self._log(
+            f"⏱  Response delay set to {val:g} second(s)."
+            + ("  (immediate responses)" if val == 0 else ""),
+            "info")
+
+    def _set_immediate(self):
+        """Reset delay to 0 (immediate response)."""
+        self.response_delay_seconds = 0.0
+        self.delay_var.set("0")
+        self._delay_indicator.config(text="INSTANT", fg=self.GREEN)
+        self._log("⚡  Response delay cleared — responses are now immediate.", "success")
 
     def _set_save_state(self, saved: bool):
         if saved:
@@ -536,7 +572,7 @@ class FalconSimulator:
         tk.Label(banner, text="🦅  EURONET FALCON TCP SIMULATOR",
                  bg="#11111b", fg=self.ACCENT,
                  font=("Consolas", 14, "bold")).pack(side="left", padx=20, pady=12)
-        tk.Label(banner, text="Developed by Rohan Sakhare",
+        tk.Label(banner, text="Developed by rsakhare@euronetworldwide.com      version 1.0.3",
                  bg="#11111b", fg=self.TXT2,
                  font=("Consolas", 10)).pack(side="left", padx=4)
         self.dot = tk.Label(banner, text="●  STOPPED",
@@ -574,6 +610,30 @@ class FalconSimulator:
         self.stop_btn  = btn("■  STOP", self._stop_server, self.CARD,
                              fg=self.RED, state="disabled")
         self.stop_btn.pack(side="left", padx=2)
+
+        # ── Response Delay controls ───────────────────────────────────────────
+        tk.Frame(ctrl, bg=self.BORDER, width=2).pack(
+            side="left", fill="y", pady=8, padx=(14, 4))
+        lbl("⏱ Delay (sec):").pack(side="left", padx=(4, 2))
+        self.delay_var = tk.StringVar(value="0")
+        self._delay_entry = tk.Entry(
+            ctrl, textvariable=self.delay_var, width=6,
+            bg=self.CARD, fg=self.ACCENT,
+            insertbackground=self.TXT,
+            relief="flat", font=("Consolas", 11, "bold"), bd=2,
+            justify="center")
+        self._delay_entry.pack(side="left", padx=2)
+        self._delay_entry.bind("<Return>",    lambda e: self._apply_delay())
+        self._delay_entry.bind("<FocusOut>",  lambda e: self._apply_delay())
+        btn("✅ Set", self._apply_delay, self.CARD, fg=self.GREEN
+            ).pack(side="left", padx=2)
+        btn("⚡ Immediate", self._set_immediate, "#1565c0", fg="#e3f2fd"
+            ).pack(side="left", padx=(2, 4))
+        self._delay_indicator = tk.Label(
+            ctrl, text="INSTANT",
+            bg=self.PANEL, fg=self.GREEN,
+            font=("Consolas", 9, "bold"))
+        self._delay_indicator.pack(side="left", padx=(0, 4))
 
         # Right side (pack right-to-left)
         btn("🗑  Clear Log",    self._clear_log,     self.CARD, fg=self.TXT2
@@ -1148,14 +1208,24 @@ class FalconSimulator:
                 # Prepend the 2-byte "00" framing prefix that the Falcon plugin
                 # expects on every incoming message (mirrors the plugin-side:
                 #   strRawMessage = "00" + m_renMsg.GetTxValue(...)  )
-                resp     = self._build_response()
-                framed   = "00" + resp          # add the 2-byte prefix
+                resp   = self._build_response()
+                framed = "00" + resp          # add the 2-byte prefix
+
+                # ── Configurable response delay ───────────────────────────────
+                delay = self.response_delay_seconds
+                if delay > 0:
+                    self._log(
+                        f"⏳  Waiting {delay:g}s before sending "
+                        f"{self._last_request_type} response…", "warn")
+                    time.sleep(delay)
+
                 try:
                     conn.sendall(framed.encode("ascii"))
+                    delay_note = f" (after {delay:g}s delay)" if delay > 0 else ""
                     self._log(
                         f"✅  {self._last_request_type} Response sent "
                         f"({len(framed)} bytes, incl. 2-byte '00' prefix) "
-                        f"— 1 response per request",
+                        f"— 1 response per request{delay_note}",
                         "success")
                     self._log(f"RAW OUT ↓\n{resp}", "raw")
                 except Exception as ex:
