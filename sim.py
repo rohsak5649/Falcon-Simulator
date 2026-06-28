@@ -581,7 +581,7 @@ class FalconSimulator:
         self.dot.pack(side="right", padx=20)
 
         # ── Control bar ───────────────────────────────────────────────────────
-        ctrl = tk.Frame(self.root, bg=self.PANEL, height=58)
+        ctrl = tk.Frame(self.root, bg=self.PANEL, height=62)
         ctrl.pack(fill="x")
         ctrl.pack_propagate(False)
 
@@ -643,21 +643,31 @@ class FalconSimulator:
         btn("💾  Save Template", self._save_template, self.CARD, fg=self.ACCENT2
             ).pack(side="right", padx=4)
 
-        tk.Frame(ctrl, bg=self.BORDER, width=2).pack(
-            side="right", fill="y", pady=8, padx=8)
+        # ── Save Response bar (second row — always fully visible) ─────────────
+        ctrl2 = tk.Frame(self.root, bg="#1a1a2e", height=46)
+        ctrl2.pack(fill="x")
+        ctrl2.pack_propagate(False)
 
-        # Save Response — the main action button
-        self.save_resp_btn = btn("✅  Save Response", self._save_response, "#40a02b")
-        self.save_resp_btn.pack(side="right", padx=6)
-
-        # Reset — restore all fields to defaults
-        btn("🔄  Reset", self._reset_response, self.CARD, fg=self.YELLOW
-            ).pack(side="right", padx=4)
-
-        self.save_indicator = tk.Label(ctrl, text="● saved", fg=self.GREEN,
-                                       bg=self.PANEL,
+        self.save_indicator = tk.Label(ctrl2, text="● saved", fg=self.GREEN,
+                                       bg="#1a1a2e",
                                        font=("Consolas", 9, "bold"))
-        self.save_indicator.pack(side="right", padx=(0, 2))
+        self.save_indicator.pack(side="left", padx=(16, 4), pady=12)
+
+        self.save_resp_btn = tk.Button(
+            ctrl2, text="✅  Save Response", command=self._save_response,
+            bg="#40a02b", fg="white", font=("Consolas", 10, "bold"),
+            relief="flat", padx=18, cursor="hand2")
+        self.save_resp_btn.pack(side="left", padx=6, pady=7)
+
+        tk.Button(ctrl2, text="🔄  Reset", command=self._reset_response,
+                  bg=self.CARD, fg=self.YELLOW, font=("Consolas", 10, "bold"),
+                  relief="flat", padx=12, cursor="hand2"
+                  ).pack(side="left", padx=4, pady=7)
+
+        tk.Label(ctrl2,
+                 text="  Edit fields in the ISO 124 / 125 / 126 or EXT10 tabs, then click Save Response to apply for the next request.",
+                 bg="#1a1a2e", fg=self.TXT2, font=("Consolas", 9)
+                 ).pack(side="left", padx=8)
 
         # ── Main paned area ───────────────────────────────────────────────────
         pane = tk.PanedWindow(self.root, orient="horizontal",
@@ -991,17 +1001,9 @@ class FalconSimulator:
         # ── Title + info bar ─────────────────────────────────────────────────
         hf = tk.Frame(parent, bg=self.BG)
         hf.pack(fill="x", padx=8, pady=(6, 0))
-        tk.Label(hf, text="🔍  Raw Data Parser — paste any raw message and inspect every field",
+        tk.Label(hf, text="🔍  Raw Data Parser ",
                  bg=self.BG, fg=self.ACCENT,
                  font=("Consolas", 10, "bold")).pack(side="left")
-
-        note = tk.Frame(parent, bg="#2a2a3e", pady=4)
-        note.pack(fill="x", padx=8, pady=(2, 6))
-        tk.Label(note,
-                 text="  Paste raw ASCII text or hex bytes below and click  🔍 Parse."
-                      "  Header and body fields will be displayed with their values.",
-                 bg="#2a2a3e", fg=self.YELLOW, font=("Consolas", 9)
-                 ).pack(side="left")
 
         # ── Options bar ──────────────────────────────────────────────────────
         opts = tk.Frame(parent, bg=self.BG)
@@ -1021,13 +1023,8 @@ class FalconSimulator:
 
         # Prefix info label (auto-behaviour — no checkbox needed)
         tk.Frame(opts, bg=self.BORDER, width=2).pack(
-            side="left", fill="y", pady=2, padx=(10, 6))
-        tk.Label(opts,
-                 text="⚡ '00' prefix auto-added + stripped silently",
-                 bg=self.BG, fg=self.GREEN,
-                 font=("Consolas", 9, "italic")
-                 ).pack(side="left", padx=4)
-
+            side="left", fill="y", pady=2, padx=(10, 6))        
+        
         # Force-type override
         tk.Frame(opts, bg=self.BORDER, width=2).pack(
             side="left", fill="y", pady=2, padx=(10, 6))
