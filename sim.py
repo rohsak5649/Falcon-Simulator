@@ -343,24 +343,33 @@ def parse_fields(raw: str, fields: list) -> dict:
 
 class FalconSimulator:
 
-    BG      = "#1e1e2e"
-    PANEL   = "#181825"
-    CARD    = "#313244"
-    ACCENT  = "#cba6f7"
-    ACCENT2 = "#89b4fa"
-    TXT     = "#cdd6f4"
-    TXT2    = "#a6adc8"
-    GREEN   = "#a6e3a1"
-    RED     = "#f38ba8"
-    YELLOW  = "#f9e2af"
-    BORDER  = "#45475a"
-    ORANGE  = "#fab387"
+    # ── Apple Vision Pro / Futuristic palette ─────────────────────────────
+    BG      = "#06060f"   # deep space void
+    PANEL   = "#0b0b1e"   # dark glass panel
+    CARD    = "#111130"   # elevated card
+    CARD2   = "#181848"   # lighter elevated card
+    ACCENT  = "#2e86ff"   # electric blue
+    ACCENT2 = "#bf5af2"   # apple purple
+    TXT     = "#f0f0ff"   # near-white with blue tint
+    TXT2    = "#5a5a80"   # muted blue-grey
+    GREEN   = "#30d158"   # apple system green
+    RED     = "#ff453a"   # apple system red
+    YELLOW  = "#ffd60a"   # apple system yellow
+    BORDER  = "#1a1a50"   # subtle glowing border
+    ORANGE  = "#ff9f0a"   # apple system orange
+    BLUE    = "#0a84ff"   # deep electric blue
+    TEAL    = "#5ac8fa"   # vision pro teal
+    # Font choices: prefer Apple system fonts, fall back gracefully
+    FONT_MONO  = ("SF Mono",   10)
+    FONT_MONO9 = ("SF Mono",    9)
+    FONT_UI    = ("SF Pro Display", 10)
+    FONT_TITLE = ("SF Pro Display", 14, "bold")
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Euronet Falcon TCP Simulator  —  Developed by Rohan Sakhare")
-        self.root.geometry("1440x920")
-        self.root.minsize(1100, 700)
+        self.root.title("🦅  Euronet Falcon TCP Simulator  —  Developed by Rohan Sakhare")
+        self.root.geometry("1480x960")
+        self.root.minsize(1100, 720)
         self.root.configure(bg=self.BG)
 
         self.server_socket = None
@@ -479,11 +488,11 @@ class FalconSimulator:
 
     def _set_save_state(self, saved: bool):
         if saved:
-            self.save_indicator.config(text="● saved", fg=self.GREEN)
-            self.save_resp_btn.config(bg="#40a02b", text="✅  Save Response")
+            self.save_indicator.config(text="  saved", fg=self.GREEN)
+            self.save_resp_btn.config(bg=self.ACCENT, text="  Save Response")
         else:
-            self.save_indicator.config(text="⚠ unsaved", fg=self.YELLOW)
-            self.save_resp_btn.config(bg="#c07000", text="✅  Save Response *")
+            self.save_indicator.config(text="  unsaved", fg=self.YELLOW)
+            self.save_resp_btn.config(bg="#8b4500", text="  Save Response  *")
 
     def _on_field_changed(self, *_):
         self._set_save_state(False)
@@ -565,38 +574,54 @@ class FalconSimulator:
     def _build_ui(self):
         self._apply_styles()
 
-        # ── Banner ────────────────────────────────────────────────────────────
-        banner = tk.Frame(self.root, bg="#11111b", height=52)
+        # -- Vision Pro Banner -----------------------------------------------
+        banner = tk.Frame(self.root, bg="#04040e", height=64)
         banner.pack(fill="x")
         banner.pack_propagate(False)
-        tk.Label(banner, text="🦅  EURONET FALCON TCP SIMULATOR",
-                 bg="#11111b", fg=self.ACCENT,
-                 font=("Consolas", 14, "bold")).pack(side="left", padx=20, pady=12)
-        tk.Label(banner, text="Developed by rsakhare@euronetworldwide.com      version 1.0.3",
-                 bg="#11111b", fg=self.TXT2,
-                 font=("Consolas", 10)).pack(side="left", padx=4)
-        self.dot = tk.Label(banner, text="●  STOPPED",
-                            bg="#11111b", fg=self.RED,
-                            font=("Consolas", 11, "bold"))
-        self.dot.pack(side="right", padx=20)
+        tk.Frame(banner, bg=self.ACCENT, width=4).pack(side="left", fill="y")
+        tk.Label(banner, text="   EURONET FALCON TCP SIMULATOR",
+                 bg="#04040e", fg=self.TXT,
+                 font=("Helvetica Neue", 15, "bold")).pack(side="left", pady=18)
+        badge = tk.Frame(banner, bg="#0a2040", padx=10, pady=3)
+        badge.pack(side="left", padx=16, pady=18)
+        tk.Label(badge, text="v1.0.3",
+                 bg="#0a2040", fg=self.TEAL,
+                 font=("Helvetica Neue", 9, "bold")).pack()
+        tk.Label(banner, text="Developed by rsakhare@euronetworldwide.com",
+                 bg="#04040e", fg=self.TXT2,
+                 font=("Helvetica Neue", 9)).pack(side="left", padx=4)
+        self._status_frame = tk.Frame(banner, bg="#04040e")
+        self._status_frame.pack(side="right", padx=24)
+        self.dot = tk.Label(self._status_frame, text="  STOPPED",
+                            bg="#04040e", fg=self.RED,
+                            font=("Helvetica Neue", 12, "bold"))
+        self.dot.pack(pady=20)
+        tk.Frame(self.root, bg=self.ACCENT, height=1).pack(fill="x")
 
-        # ── Control bar ───────────────────────────────────────────────────────
+        # -- Control bar row 1 -----------------------------------------------
         ctrl = tk.Frame(self.root, bg=self.PANEL, height=62)
         ctrl.pack(fill="x")
         ctrl.pack_propagate(False)
 
         def lbl(t):
             return tk.Label(ctrl, text=t, bg=self.PANEL, fg=self.TXT2,
-                            font=("Consolas", 10))
+                            font=("Helvetica Neue", 10))
         def ent(var, w):
             return tk.Entry(ctrl, textvariable=var, width=w,
-                            bg=self.CARD, fg=self.TXT,
-                            insertbackground=self.TXT,
-                            relief="flat", font=("Consolas", 11), bd=2)
+                            bg=self.CARD2, fg=self.TXT,
+                            insertbackground=self.TEAL,
+                            relief="flat", font=("Helvetica Neue", 11),
+                            highlightthickness=1,
+                            highlightcolor=self.ACCENT,
+                            highlightbackground=self.BORDER)
         def btn(text, cmd, bg, fg="white", **kw):
             return tk.Button(ctrl, text=text, command=cmd,
-                             bg=bg, fg=fg, font=("Consolas", 10, "bold"),
-                             relief="flat", padx=12, cursor="hand2", **kw)
+                             bg=bg, fg=fg,
+                             font=("Helvetica Neue", 10, "bold"),
+                             relief="flat", padx=14,
+                             activebackground=self.CARD2,
+                             activeforeground=self.TXT,
+                             cursor="hand2", **kw)
 
         lbl("Listen IP:").pack(side="left", padx=(16, 4), pady=16)
         self.ip_var = tk.StringVar(value="127.0.0.1")
@@ -605,69 +630,82 @@ class FalconSimulator:
         self.port_var = tk.StringVar(value="8070")
         ent(self.port_var, 7).pack(side="left", padx=4)
 
-        self.start_btn = btn("▶  START", self._start_server, "#40a02b")
+        self.start_btn = btn("  START", self._start_server, self.ACCENT)
         self.start_btn.pack(side="left", padx=12)
-        self.stop_btn  = btn("■  STOP", self._stop_server, self.CARD,
-                             fg=self.RED, state="disabled")
+        self.stop_btn = btn("  STOP", self._stop_server, self.CARD,
+                            fg=self.RED, state="disabled")
         self.stop_btn.pack(side="left", padx=2)
 
-        # ── Response Delay controls ───────────────────────────────────────────
-        tk.Frame(ctrl, bg=self.BORDER, width=2).pack(
-            side="left", fill="y", pady=8, padx=(14, 4))
-        lbl("⏱ Delay (sec):").pack(side="left", padx=(4, 2))
+        # -- Response Delay controls -----------------------------------------
+        tk.Frame(ctrl, bg=self.BORDER, width=1).pack(
+            side="left", fill="y", pady=10, padx=(16, 6))
+        lbl("  Delay:").pack(side="left", padx=(4, 2))
         self.delay_var = tk.StringVar(value="0")
         self._delay_entry = tk.Entry(
-            ctrl, textvariable=self.delay_var, width=6,
-            bg=self.CARD, fg=self.ACCENT,
-            insertbackground=self.TXT,
-            relief="flat", font=("Consolas", 11, "bold"), bd=2,
+            ctrl, textvariable=self.delay_var, width=5,
+            bg=self.CARD2, fg=self.ACCENT,
+            insertbackground=self.TEAL,
+            relief="flat", font=("Helvetica Neue", 11, "bold"),
+            highlightthickness=1,
+            highlightcolor=self.ACCENT,
+            highlightbackground=self.BORDER,
             justify="center")
         self._delay_entry.pack(side="left", padx=2)
-        self._delay_entry.bind("<Return>",    lambda e: self._apply_delay())
-        self._delay_entry.bind("<FocusOut>",  lambda e: self._apply_delay())
-        btn("✅ Set", self._apply_delay, self.CARD, fg=self.GREEN
+        lbl("sec").pack(side="left", padx=(0, 4))
+        self._delay_entry.bind("<Return>",   lambda e: self._apply_delay())
+        self._delay_entry.bind("<FocusOut>", lambda e: self._apply_delay())
+        btn("Set", self._apply_delay, "#1a3a1a", fg=self.GREEN
             ).pack(side="left", padx=2)
-        btn("⚡ Immediate", self._set_immediate, "#1565c0", fg="#e3f2fd"
-            ).pack(side="left", padx=(2, 4))
+        btn("Immediate", self._set_immediate, "#0a1e40", fg=self.TEAL
+            ).pack(side="left", padx=(2, 6))
         self._delay_indicator = tk.Label(
             ctrl, text="INSTANT",
             bg=self.PANEL, fg=self.GREEN,
-            font=("Consolas", 9, "bold"))
+            font=("Helvetica Neue", 9, "bold"))
         self._delay_indicator.pack(side="left", padx=(0, 4))
 
         # Right side (pack right-to-left)
-        btn("🗑  Clear Log",    self._clear_log,     self.CARD, fg=self.TXT2
-            ).pack(side="right", padx=12)
-        btn("📂  Load Template", self._load_template, self.CARD, fg=self.ACCENT2
-            ).pack(side="right", padx=4)
-        btn("💾  Save Template", self._save_template, self.CARD, fg=self.ACCENT2
-            ).pack(side="right", padx=4)
+        btn("Clear Log",    self._clear_log,     self.CARD,    fg=self.TXT2
+            ).pack(side="right", padx=10)
+        btn("Load Template", self._load_template, "#0a1a30", fg=self.TEAL
+            ).pack(side="right", padx=3)
+        btn("Save Template", self._save_template, "#0a1a30", fg=self.TEAL
+            ).pack(side="right", padx=3)
 
-        # ── Save Response bar (second row — always fully visible) ─────────────
-        ctrl2 = tk.Frame(self.root, bg="#1a1a2e", height=46)
+        # -- Save Response bar (always visible, Vision Pro style) ------------
+        tk.Frame(self.root, bg=self.BORDER, height=1).pack(fill="x")
+        ctrl2 = tk.Frame(self.root, bg="#08081c", height=48)
         ctrl2.pack(fill="x")
         ctrl2.pack_propagate(False)
-
-        self.save_indicator = tk.Label(ctrl2, text="● saved", fg=self.GREEN,
-                                       bg="#1a1a2e",
-                                       font=("Consolas", 9, "bold"))
-        self.save_indicator.pack(side="left", padx=(16, 4), pady=12)
-
+        tk.Frame(ctrl2, bg=self.GREEN, width=3).pack(side="left", fill="y")
+        self.save_indicator = tk.Label(ctrl2, text="  saved", fg=self.GREEN,
+                                       bg="#08081c",
+                                       font=("Helvetica Neue", 10, "bold"))
+        self.save_indicator.pack(side="left", padx=(14, 6), pady=12)
         self.save_resp_btn = tk.Button(
-            ctrl2, text="✅  Save Response", command=self._save_response,
-            bg="#40a02b", fg="white", font=("Consolas", 10, "bold"),
-            relief="flat", padx=18, cursor="hand2")
-        self.save_resp_btn.pack(side="left", padx=6, pady=7)
-
-        tk.Button(ctrl2, text="🔄  Reset", command=self._reset_response,
-                  bg=self.CARD, fg=self.YELLOW, font=("Consolas", 10, "bold"),
-                  relief="flat", padx=12, cursor="hand2"
-                  ).pack(side="left", padx=4, pady=7)
-
+            ctrl2, text="  Save Response", command=self._save_response,
+            bg=self.ACCENT, fg="white",
+            font=("Helvetica Neue", 11, "bold"),
+            relief="flat", padx=22,
+            activebackground=self.BLUE,
+            activeforeground="white",
+            cursor="hand2")
+        self.save_resp_btn.pack(side="left", padx=8, pady=8)
+        tk.Button(ctrl2, text="  Reset", command=self._reset_response,
+                  bg=self.CARD, fg=self.YELLOW,
+                  font=("Helvetica Neue", 10, "bold"),
+                  relief="flat", padx=14,
+                  activebackground=self.CARD2,
+                  activeforeground=self.YELLOW,
+                  cursor="hand2"
+                  ).pack(side="left", padx=4, pady=8)
         tk.Label(ctrl2,
-                 text="  Edit fields in the ISO 124 / 125 / 126 or EXT10 tabs, then click Save Response to apply for the next request.",
-                 bg="#1a1a2e", fg=self.TXT2, font=("Consolas", 9)
-                 ).pack(side="left", padx=8)
+                 text="  Edit fields in ISO 124 / 125 / 126 or EXT10 tabs, "
+                      "then click Save Response to apply for the next request.",
+                 bg="#08081c", fg=self.TXT2,
+                 font=("Helvetica Neue", 9)
+                 ).pack(side="left", padx=12)
+        tk.Frame(self.root, bg=self.BORDER, height=1).pack(fill="x")
 
         # ── Main paned area ───────────────────────────────────────────────────
         pane = tk.PanedWindow(self.root, orient="horizontal",
@@ -716,44 +754,68 @@ class FalconSimulator:
     def _apply_styles(self):
         s = ttk.Style()
         s.theme_use("clam")
-        s.configure("TNotebook",     background=self.BG,   borderwidth=0)
-        s.configure("TNotebook.Tab", background=self.CARD, foreground=self.TXT2,
-                    padding=[14, 6], font=("Consolas", 10))
+        # Notebook
+        s.configure("TNotebook",
+                    background=self.BG, borderwidth=0, tabmargins=[0, 4, 0, 0])
+        s.configure("TNotebook.Tab",
+                    background=self.CARD, foreground=self.TXT2,
+                    padding=[16, 7],
+                    font=("Helvetica Neue", 10))
         s.map("TNotebook.Tab",
-              background=[("selected", self.PANEL)],
+              background=[("selected", "#0d0d2e")],
               foreground=[("selected", self.ACCENT)])
-        s.configure("TFrame",     background=self.BG)
-        s.configure("TScrollbar", background=self.CARD,
-                    troughcolor=self.PANEL, arrowcolor=self.TXT2)
+        # Frames
+        s.configure("TFrame", background=self.BG)
+        # Scrollbars
+        s.configure("TScrollbar",
+                    background=self.CARD2,
+                    troughcolor=self.PANEL,
+                    arrowcolor=self.TXT2,
+                    borderwidth=0,
+                    arrowsize=10)
+        s.map("TScrollbar",
+              background=[("active", self.BORDER)])
 
     # ── Request viewer tab ────────────────────────────────────────────────────
 
     def _build_request_tab(self, parent):
         top = tk.Frame(parent, bg=self.BG)
-        top.pack(fill="x", padx=8, pady=(6, 2))
-        tk.Label(top, text="Last received request — parsed fields",
-                 bg=self.BG, fg=self.TXT2, font=("Consolas", 9)).pack(side="left")
+        top.pack(fill="x", padx=10, pady=(8, 3))
+
+        # Section pill header
+        hdr_pill = tk.Frame(top, bg=self.CARD2, padx=12, pady=4)
+        hdr_pill.pack(side="left")
+        tk.Label(hdr_pill, text="▸  INCOMING REQUEST",
+                 bg=self.CARD2, fg=self.TEAL,
+                 font=("Helvetica Neue", 10, "bold")).pack(side="left")
+        tk.Label(hdr_pill, text="  parsed field-by-field",
+                 bg=self.CARD2, fg=self.TXT2,
+                 font=("Helvetica Neue", 9)).pack(side="left")
+
         tk.Button(top, text="🗑  Clear", command=self._clear_request,
-                  bg=self.CARD, fg=self.RED, font=("Consolas", 9),
-                  relief="flat", padx=8, cursor="hand2").pack(side="right")
+                  bg=self.CARD, fg=self.RED,
+                  font=("Helvetica Neue", 9, "bold"),
+                  relief="flat", padx=10, cursor="hand2",
+                  activebackground=self.CARD2, activeforeground=self.RED
+                  ).pack(side="right")
 
         self.req_text = scrolledtext.ScrolledText(
-            parent, bg=self.PANEL, fg=self.TXT, font=("Consolas", 10),
+            parent, bg="#050514", fg=self.TXT, font=("Menlo", 10),
             relief="flat", selectbackground=self.ACCENT,
-            selectforeground="#11111b", insertbackground=self.TXT,
-            state="disabled")
+            selectforeground="#ffffff", insertbackground=self.TEAL,
+            state="disabled", padx=8, pady=6)
         self.req_text.pack(fill="both", expand=True, padx=6, pady=(2, 6))
 
         for tag, fg, bold in [
-            ("sec",  self.ACCENT,  True),  ("fld",  self.ACCENT2, False),
-            ("val",  self.TXT,     False),  ("raw",  self.YELLOW,  False),
-            ("ts",   self.TXT2,    False),  ("sep",  self.BORDER,  False),
-            ("err",  self.RED,     False),  ("echo", self.GREEN,   False),
-            ("resv", self.ORANGE,  False),  # tag for RESERVED_01 highlight
+            ("sec",  self.ACCENT,   True),   ("fld",  self.ACCENT2, False),
+            ("val",  self.TXT,      False),   ("raw",  self.YELLOW,  False),
+            ("ts",   self.TXT2,     False),   ("sep",  self.BORDER,  False),
+            ("err",  self.RED,      False),   ("echo", self.GREEN,   False),
+            ("resv", self.ORANGE,   False),
         ]:
             self.req_text.tag_configure(
                 tag, foreground=fg,
-                font=("Consolas", 10, "bold") if bold else ("Consolas", 10))
+                font=("Menlo", 10, "bold") if bold else ("Menlo", 10))
 
     def _clear_request(self):
         self.req_text.config(state="normal")
@@ -771,17 +833,19 @@ class FalconSimulator:
         externalHeaderData is shown read-only (echoed from inbound request).
         """
         hf = tk.Frame(parent, bg=self.BG)
-        hf.pack(fill="x", padx=8, pady=(6, 0))
+        hf.pack(fill="x", padx=10, pady=(8, 0))
         tk.Label(hf, text=title, bg=self.BG, fg=self.ACCENT,
-                 font=("Consolas", 10, "bold")).pack(side="left")
+                 font=("Helvetica Neue", 10, "bold")).pack(side="left")
 
-        note = tk.Frame(parent, bg="#2a2a3e", pady=4)
-        note.pack(fill="x", padx=8, pady=(2, 6))
+        note = tk.Frame(parent, bg="#0a0a28", pady=5)
+        note.pack(fill="x", padx=8, pady=(3, 6))
+        tk.Frame(note, bg=self.YELLOW, width=3).pack(side="left", fill="y")
         tk.Label(note,
-                 text="  ✏  Edit values, then click  ✅ Save Response  to apply."
+                 text="  ✏️  Edit values then click  ✔ Save Response  to apply."
                       "  Fields are fixed-width — auto padded/trimmed on send.",
-                 bg="#2a2a3e", fg=self.YELLOW, font=("Consolas", 9)
-                 ).pack(side="left")
+                 bg="#0a0a28", fg=self.YELLOW,
+                 font=("Helvetica Neue", 9)
+                 ).pack(side="left", padx=6)
 
         canvas = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
         sb     = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
@@ -804,13 +868,13 @@ class FalconSimulator:
         canvas.bind("<Button-5>", lambda e: canvas.yview_scroll( 1, "units"))
 
         # Column headers
-        hdr = tk.Frame(inner, bg=self.CARD)
+        hdr = tk.Frame(inner, bg=self.CARD2)
         hdr.pack(fill="x", padx=2, pady=(2, 1))
         for col, w in [("Field Name", 32), ("Size", 6),
                        ("Active (sent)", 26), ("Edit value", 0)]:
-            tk.Label(hdr, text=col, bg=self.CARD, fg=self.ACCENT,
-                     font=("Consolas", 9, "bold"), width=w,
-                     anchor="w").pack(side="left", padx=6, pady=3)
+            tk.Label(hdr, text=col, bg=self.CARD2, fg=self.TEAL,
+                     font=("Helvetica Neue", 9, "bold"), width=w,
+                     anchor="w").pack(side="left", padx=6, pady=4)
 
         # Choose which active dict to read for the "Active" column
         if var_dict is self.svars124:
@@ -833,17 +897,17 @@ class FalconSimulator:
             row.pack(fill="x", padx=2, pady=1)
 
             tk.Label(row, text=name, bg=self.PANEL, fg=self.ACCENT2,
-                     font=("Consolas", 9), width=32, anchor="w"
+                     font=("Menlo", 9), width=32, anchor="w"
                      ).pack(side="left", padx=6)
 
-            # Size column — show "dyn" for auto/dynamic fields, number for fixed
+            # Size column
             size_display = (
                 "auto" if is_auto
                 else "dyn"  if (is_echo or is_ext_len)
                 else str(size)
             )
             tk.Label(row, text=size_display, bg=self.PANEL, fg=self.TXT2,
-                     font=("Consolas", 9), width=6, anchor="w"
+                     font=("Menlo", 9), width=6, anchor="w"
                      ).pack(side="left", padx=2)
 
             # Active value column
@@ -854,7 +918,7 @@ class FalconSimulator:
                           else repr(active_val),
                      bg=self.PANEL,
                      fg=self.TXT2 if (is_auto or is_echo or is_ext_len) else self.GREEN,
-                     font=("Consolas", 8), width=26, anchor="w"
+                     font=("Menlo", 8), width=26, anchor="w"
                      ).pack(side="left", padx=4)
 
             # Edit column
@@ -864,26 +928,29 @@ class FalconSimulator:
             if is_auto:
                 tk.Label(row, text="auto — always recalculated on send",
                          bg=self.PANEL, fg=self.TXT2,
-                         font=("Consolas", 9, "italic")
+                         font=("Menlo", 9, "italic")
                          ).pack(side="left", padx=8)
             elif is_ext_len:
                 tk.Label(row,
                          text="dynamic — echoed from inbound extHeaderLength",
                          bg=self.PANEL, fg=self.YELLOW,
-                         font=("Consolas", 9, "italic")
+                         font=("Menlo", 9, "italic")
                          ).pack(side="left", padx=8)
             elif is_echo:
                 tk.Label(row, text="echoed from inbound externalHeaderData",
                          bg=self.PANEL, fg=self.GREEN,
-                         font=("Consolas", 9, "italic")
+                         font=("Menlo", 9, "italic")
                          ).pack(side="left", padx=8)
             else:
-                # Attach change callback AFTER StringVar is created
                 var.trace_add("write", self._on_field_changed)
                 tk.Entry(row, textvariable=var,
-                         bg=self.CARD, fg=self.TXT,
-                         insertbackground=self.TXT, relief="flat",
-                         font=("Consolas", 9), width=60
+                         bg=self.CARD2, fg=self.TXT,
+                         insertbackground=self.TEAL, relief="flat",
+                         font=("Menlo", 9),
+                         highlightthickness=1,
+                         highlightcolor=self.ACCENT,
+                         highlightbackground=self.BORDER,
+                         width=60
                          ).pack(side="left", padx=4, pady=2,
                                 fill="x", expand=True)
 
@@ -896,19 +963,21 @@ class FalconSimulator:
         and self.svars_ext10_resp / self.active_ext10_resp.
         """
         hf = tk.Frame(parent, bg=self.BG)
-        hf.pack(fill="x", padx=8, pady=(6, 0))
+        hf.pack(fill="x", padx=10, pady=(8, 0))
         tk.Label(hf,
-                 text="EXT10 Response Body — sent automatically when an EXT10 request is received",
+                 text="EXT10 Response Body — sent automatically when an EXT10 request arrives",
                  bg=self.BG, fg=self.ACCENT,
-                 font=("Consolas", 10, "bold")).pack(side="left")
+                 font=("Helvetica Neue", 10, "bold")).pack(side="left")
 
-        note = tk.Frame(parent, bg="#2a2a3e", pady=4)
-        note.pack(fill="x", padx=8, pady=(2, 6))
+        note = tk.Frame(parent, bg="#0a0a28", pady=5)
+        note.pack(fill="x", padx=8, pady=(3, 6))
+        tk.Frame(note, bg=self.YELLOW, width=3).pack(side="left", fill="y")
         tk.Label(note,
-                 text="  ✏  Edit 'Response' value, then click  ✅ Save Response  to apply."
+                 text="  ✏️  Edit 'Response' value then click  ✔ Save Response  to apply."
                       "  All other fields are echoed from the inbound EXT10 request.",
-                 bg="#2a2a3e", fg=self.YELLOW, font=("Consolas", 9)
-                 ).pack(side="left")
+                 bg="#0a0a28", fg=self.YELLOW,
+                 font=("Helvetica Neue", 9)
+                 ).pack(side="left", padx=6)
 
         canvas = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
         sb     = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
@@ -968,7 +1037,7 @@ class FalconSimulator:
                      text="(echoed from request)" if is_echo else repr(active_val),
                      bg=self.PANEL,
                      fg=self.TXT2 if is_echo else self.GREEN,
-                     font=("Consolas", 8), width=26, anchor="w"
+                     font=("Menlo", 8), width=26, anchor="w"
                      ).pack(side="left", padx=4)
 
             var = tk.StringVar(value=str(default_val))
@@ -977,14 +1046,14 @@ class FalconSimulator:
             if is_echo:
                 tk.Label(row, text="echoed from EXT10 request body (auto)",
                          bg=self.PANEL, fg=self.GREEN,
-                         font=("Consolas", 9, "italic")
+                         font=("Menlo", 9, "italic")
                          ).pack(side="left", padx=8)
             else:
                 var.trace_add("write", self._on_field_changed)
                 tk.Entry(row, textvariable=var,
                          bg=self.CARD, fg=self.TXT,
                          insertbackground=self.TXT, relief="flat",
-                         font=("Consolas", 9), width=60
+                         font=("Menlo", 9), width=60
                          ).pack(side="left", padx=4, pady=2,
                                 fill="x", expand=True)
 
@@ -1016,9 +1085,9 @@ class FalconSimulator:
         for val, lbl_text in [("ascii", "ASCII"), ("hex", "HEX")]:
             tk.Radiobutton(
                 opts, text=lbl_text, variable=self._parser_fmt, value=val,
-                bg=self.BG, fg=self.TXT, selectcolor=self.CARD,
-                activebackground=self.BG, activeforeground=self.ACCENT,
-                font=("Consolas", 9), cursor="hand2"
+                bg=self.PANEL, fg=self.TXT, selectcolor=self.CARD2,
+                activebackground=self.PANEL, activeforeground=self.TEAL,
+                font=("Helvetica Neue", 9), cursor="hand2"
             ).pack(side="left", padx=4)
 
         # Prefix info label (auto-behaviour — no checkbox needed)
@@ -1026,17 +1095,17 @@ class FalconSimulator:
             side="left", fill="y", pady=2, padx=(10, 6))        
         
         # Force-type override
-        tk.Frame(opts, bg=self.BORDER, width=2).pack(
-            side="left", fill="y", pady=2, padx=(10, 6))
-        tk.Label(opts, text="Force type:", bg=self.BG, fg=self.TXT2,
-                 font=("Consolas", 9)).pack(side="left", padx=(0, 4))
+        tk.Frame(opts, bg=self.BORDER, width=1).pack(
+            side="left", fill="y", pady=4, padx=(10, 6))
+        tk.Label(opts, text="Force type:", bg=self.PANEL, fg=self.TXT2,
+                 font=("Helvetica Neue", 9)).pack(side="left", padx=(0, 4))
         self._parser_force_type = tk.StringVar(value="auto")
         for val, lbl_text in [("auto", "Auto-detect"), ("DBTRAN25", "DBTran25"), ("EXT10", "EXT10")]:
             tk.Radiobutton(
                 opts, text=lbl_text, variable=self._parser_force_type, value=val,
-                bg=self.BG, fg=self.TXT, selectcolor=self.CARD,
-                activebackground=self.BG, activeforeground=self.ACCENT,
-                font=("Consolas", 9), cursor="hand2"
+                bg=self.PANEL, fg=self.TXT, selectcolor=self.CARD2,
+                activebackground=self.PANEL, activeforeground=self.TEAL,
+                font=("Helvetica Neue", 9), cursor="hand2"
             ).pack(side="left", padx=3)
 
         # ── Paned layout: input top, output bottom ────────────────────────────
@@ -1050,31 +1119,33 @@ class FalconSimulator:
 
         inp_top = tk.Frame(inp_frame, bg=self.BG)
         inp_top.pack(fill="x", pady=(2, 2))
-        tk.Label(inp_top, text="📋  Raw Input", bg=self.BG, fg=self.ACCENT2,
-                 font=("Consolas", 9, "bold")).pack(side="left")
-
-        # Byte counter label
+        tk.Label(inp_top, text="  Raw Input", bg=self.BG, fg=self.TEAL,
+                 font=("Helvetica Neue", 9, "bold")).pack(side="left")
         self._parser_byte_lbl = tk.Label(
-            inp_top, text="", bg=self.BG, fg=self.TXT2, font=("Consolas", 9))
+            inp_top, text="", bg=self.BG, fg=self.TXT2,
+            font=("Helvetica Neue", 9))
         self._parser_byte_lbl.pack(side="left", padx=12)
-
-        tk.Button(inp_top, text="🗑  Clear Input",
+        tk.Button(inp_top, text="Clear Input",
                   command=self._clear_raw_input,
                   bg=self.CARD, fg=self.RED,
-                  font=("Consolas", 9), relief="flat",
-                  padx=8, cursor="hand2").pack(side="right", padx=4)
-
-        tk.Button(inp_top, text="🔍  Parse",
+                  font=("Helvetica Neue", 9, "bold"), relief="flat",
+                  padx=10, cursor="hand2",
+                  activebackground=self.CARD2, activeforeground=self.RED
+                  ).pack(side="right", padx=4)
+        tk.Button(inp_top, text="  Parse",
                   command=self._parse_raw_input,
-                  bg="#40a02b", fg="white",
-                  font=("Consolas", 10, "bold"), relief="flat",
-                  padx=14, cursor="hand2").pack(side="right", padx=4)
+                  bg=self.ACCENT, fg="white",
+                  font=("Helvetica Neue", 10, "bold"), relief="flat",
+                  padx=16, cursor="hand2",
+                  activebackground=self.BLUE, activeforeground="white"
+                  ).pack(side="right", padx=4)
 
         self._parser_input = scrolledtext.ScrolledText(
-            inp_frame, bg="#11111b", fg=self.YELLOW,
-            font=("Consolas", 10), relief="flat",
-            selectbackground=self.ACCENT, selectforeground="#11111b",
-            insertbackground=self.TXT, height=8, wrap="char")
+            inp_frame, bg="#040412", fg=self.TEAL,
+            font=("Menlo", 10), relief="flat",
+            selectbackground=self.ACCENT, selectforeground="#ffffff",
+            insertbackground=self.TEAL, height=8, wrap="char",
+            padx=8, pady=6)
         self._parser_input.pack(fill="both", expand=True)
         self._parser_input.bind("<KeyRelease>", self._update_parser_byte_count)
 
@@ -1084,38 +1155,40 @@ class FalconSimulator:
 
         out_top = tk.Frame(out_frame, bg=self.BG)
         out_top.pack(fill="x", pady=(4, 2))
-        tk.Label(out_top, text="📊  Parsed Fields", bg=self.BG, fg=self.ACCENT2,
-                 font=("Consolas", 9, "bold")).pack(side="left")
-
+        tk.Label(out_top, text="  Parsed Fields", bg=self.BG, fg=self.TEAL,
+                 font=("Helvetica Neue", 9, "bold")).pack(side="left")
         self._parser_status_lbl = tk.Label(
-            out_top, text="", bg=self.BG, fg=self.TXT2, font=("Consolas", 9))
+            out_top, text="", bg=self.BG, fg=self.TXT2,
+            font=("Helvetica Neue", 9))
         self._parser_status_lbl.pack(side="left", padx=12)
-
-        tk.Button(out_top, text="🗑  Clear Output",
+        tk.Button(out_top, text="Clear Output",
                   command=self._clear_raw_output,
                   bg=self.CARD, fg=self.RED,
-                  font=("Consolas", 9), relief="flat",
-                  padx=8, cursor="hand2").pack(side="right", padx=4)
+                  font=("Helvetica Neue", 9, "bold"), relief="flat",
+                  padx=10, cursor="hand2",
+                  activebackground=self.CARD2, activeforeground=self.RED
+                  ).pack(side="right", padx=4)
 
         self._parser_output = scrolledtext.ScrolledText(
-            out_frame, bg=self.PANEL, fg=self.TXT,
-            font=("Consolas", 10), relief="flat",
-            selectbackground=self.ACCENT, selectforeground="#11111b",
-            insertbackground=self.TXT, state="disabled", wrap="word")
+            out_frame, bg="#050514", fg=self.TXT,
+            font=("Menlo", 10), relief="flat",
+            selectbackground=self.ACCENT, selectforeground="#ffffff",
+            insertbackground=self.TEAL, state="disabled", wrap="word",
+            padx=8, pady=6)
         self._parser_output.pack(fill="both", expand=True)
 
         # Reuse the same colour tags as req_text
         for tag, fg, bold in [
-            ("sec",  self.ACCENT,  True),  ("fld",  self.ACCENT2, False),
-            ("val",  self.TXT,     False),  ("raw",  self.YELLOW,  False),
-            ("ts",   self.TXT2,    False),  ("sep",  self.BORDER,  False),
-            ("err",  self.RED,     True),   ("echo", self.GREEN,   False),
-            ("resv", self.ORANGE,  False),  ("warn", self.YELLOW,  False),
-            ("ok",   self.GREEN,   True),   ("info", self.ACCENT2, False),
+            ("sec",  self.ACCENT,  True),   ("fld",  self.ACCENT2, False),
+            ("val",  self.TXT,     False),   ("raw",  self.YELLOW,  False),
+            ("ts",   self.TXT2,    False),   ("sep",  self.BORDER,  False),
+            ("err",  self.RED,     True),    ("echo", self.GREEN,   False),
+            ("resv", self.ORANGE,  False),   ("warn", self.YELLOW,  False),
+            ("ok",   self.GREEN,   True),    ("info", self.ACCENT2, False),
         ]:
             self._parser_output.tag_configure(
                 tag, foreground=fg,
-                font=("Consolas", 10, "bold") if bold else ("Consolas", 10))
+                font=("Menlo", 10, "bold") if bold else ("Menlo", 10))
 
     def _update_parser_byte_count(self, _event=None):
         """Live byte counter shown next to the input label."""
@@ -1310,21 +1383,32 @@ class FalconSimulator:
     # ── Log panel ─────────────────────────────────────────────────────────────
 
     def _build_log_panel(self, parent):
-        tk.Label(parent, text="📋  Activity Log",
-                 bg=self.BG, fg=self.ACCENT,
-                 font=("Consolas", 11, "bold")).pack(anchor="w", padx=8, pady=(8, 2))
+        # Log panel header
+        log_hdr = tk.Frame(parent, bg="#050514", height=36)
+        log_hdr.pack(fill="x")
+        log_hdr.pack_propagate(False)
+        tk.Frame(log_hdr, bg=self.ACCENT2, width=3).pack(side="left", fill="y")
+        tk.Label(log_hdr, text="  💻  ACTIVITY LOG",
+                 bg="#050514", fg=self.ACCENT2,
+                 font=("Helvetica Neue", 11, "bold")).pack(side="left", padx=8, pady=6)
+        tk.Button(log_hdr, text="✕ Clear", command=self._clear_log,
+                  bg="#050514", fg=self.TXT2,
+                  font=("Helvetica Neue", 9), relief="flat",
+                  cursor="hand2", activeforeground=self.RED
+                  ).pack(side="right", padx=8)
 
         self.log_text = scrolledtext.ScrolledText(
-            parent, bg=self.PANEL, fg=self.TXT, font=("Consolas", 10),
+            parent, bg="#050514", fg=self.TXT, font=("Menlo", 10),
             relief="flat", selectbackground=self.ACCENT,
-            selectforeground="#11111b", insertbackground=self.TXT,
-            state="disabled", wrap="word")
-        self.log_text.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+            selectforeground="#ffffff", insertbackground=self.TEAL,
+            state="disabled", wrap="word", padx=8, pady=6)
+        self.log_text.pack(fill="both", expand=True, padx=0, pady=(0, 0))
 
         for tag, fg in [
-            ("ts", self.TXT2), ("info", self.ACCENT2), ("success", self.GREEN),
-            ("error", self.RED), ("warn", self.YELLOW), ("raw", self.ORANGE),
-            ("sep", self.BORDER),
+            ("ts",      self.TXT2),     ("info",    self.TEAL),
+            ("success", self.GREEN),    ("error",   self.RED),
+            ("warn",    self.YELLOW),   ("raw",     self.ORANGE),
+            ("sep",     self.BORDER),
         ]:
             self.log_text.tag_configure(tag, foreground=fg)
 
@@ -1365,7 +1449,7 @@ class FalconSimulator:
         self.server_thread = threading.Thread(target=self._accept_loop, daemon=True)
         self.server_thread.start()
         self._log(f"Server started — listening on {ip}:{port}", "success")
-        self._set_dot(f"●  LISTENING  {ip}:{port}", self.GREEN)
+        self._set_dot(f"  LISTENING  {ip}:{port}", self.GREEN)
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
 
@@ -1380,7 +1464,7 @@ class FalconSimulator:
         self.client_conn   = None
         self.server_socket = None
         self._log("Server stopped.", "warn")
-        self._set_dot("●  STOPPED", self.RED)
+        self._set_dot("  STOPPED", self.RED)
         self.start_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
 
@@ -1419,13 +1503,13 @@ class FalconSimulator:
                 continue
 
             self._log(f"Client connected: {cip}:{cport}", "success")
-            self._set_dot(f"●  CONNECTED  {cip}:{cport}", self.ACCENT)
+            self._set_dot(f"  CONNECTED  {cip}:{cport}", self.ACCENT)
             self.client_conn = conn
             self._handle_client(conn, addr)
             self._log(f"Client disconnected: {cip}:{cport}", "warn")
             self.client_conn = None
             self._set_dot(
-                f"●  LISTENING  {self._bound_ip}:{self._bound_port}",
+                f"  LISTENING  {self._bound_ip}:{self._bound_port}",
                 self.GREEN)
 
     def _handle_client(self, conn: socket.socket, addr):
