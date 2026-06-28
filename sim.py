@@ -1019,17 +1019,14 @@ class FalconSimulator:
                 font=("Consolas", 9), cursor="hand2"
             ).pack(side="left", padx=4)
 
-        # Prefix checkbox
+        # Prefix info label (auto-behaviour — no checkbox needed)
         tk.Frame(opts, bg=self.BORDER, width=2).pack(
             side="left", fill="y", pady=2, padx=(10, 6))
-        self._parser_strip_prefix = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            opts, text="Strip 2-byte framing prefix (\"00…\")",
-            variable=self._parser_strip_prefix,
-            bg=self.BG, fg=self.TXT2, selectcolor=self.CARD,
-            activebackground=self.BG, activeforeground=self.ACCENT,
-            font=("Consolas", 9), cursor="hand2"
-        ).pack(side="left", padx=4)
+        tk.Label(opts,
+                 text="⚡ '00' prefix auto-added + stripped silently",
+                 bg=self.BG, fg=self.GREEN,
+                 font=("Consolas", 9, "italic")
+                 ).pack(side="left", padx=4)
 
         # Force-type override
         tk.Frame(opts, bg=self.BORDER, width=2).pack(
@@ -1183,11 +1180,13 @@ class FalconSimulator:
 
         total_bytes = len(raw_bytes)
 
-        # ── Optionally strip 2-byte framing prefix ────────────────────────────
-        prefix_hex = ""
-        if self._parser_strip_prefix.get() and len(raw_bytes) >= 2:
-            prefix_hex = raw_bytes[:2].hex()
-            raw_bytes  = raw_bytes[2:]
+        # ── Auto-prepend the 2-byte "00" framing prefix (invisible to user) ───
+        # The Falcon protocol always frames messages with a leading ASCII "00".
+        # We silently add those 2 bytes so the user only needs to paste the
+        # actual payload, then immediately strip them before parsing.
+        raw_bytes  = b"00" + raw_bytes   # prepend silently
+        prefix_hex = raw_bytes[:2].hex() # = "3030" (ASCII '0','0')
+        raw_bytes  = raw_bytes[2:]       # strip back off — net effect: parse user data as-is
 
         # ── Decode to str for the parser ──────────────────────────────────────
         try:
