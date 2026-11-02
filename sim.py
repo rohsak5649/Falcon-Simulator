@@ -5,6 +5,7 @@ Developed by Rohan Sakhare
 Internal Tool — IDFC First Bank / Euronet Integration
 """
 
+import sys
 import socket
 import threading
 import time
@@ -411,18 +412,42 @@ def parse_network_message(raw: str) -> tuple:
 
 class FalconSimulator:
 
-    BG      = "#1e1e2e"
-    PANEL   = "#181825"
-    CARD    = "#313244"
-    ACCENT  = "#cba6f7"
-    ACCENT2 = "#89b4fa"
-    TXT     = "#cdd6f4"
-    TXT2    = "#a6adc8"
-    GREEN   = "#a6e3a1"
-    RED     = "#f38ba8"
-    YELLOW  = "#f9e2af"
-    BORDER  = "#45475a"
-    ORANGE  = "#fab387"
+    # ── Apple Vision Pro Glassmorphism Palette (Strictly Black & Sky Blue) ───
+    BG          = "#030712"   # Deep space black
+    PANEL       = "#080e1a"   # Dark glass panel base
+    PANEL_ALT   = "#0b1424"   # Secondary translucent panel surface
+    CARD        = "#0f1b2e"   # Glass card surface
+    CARD_HOVER  = "#172740"   # Glass card hover
+    BORDER      = "#1e2e46"   # Translucent glass border
+    BORDER_GLOW = "#0284c7"   # Sky blue focus glow border
+
+    # Sky Blue Accent Family
+    SKY_PRIMARY = "#0ea5e9"   # Core Sky Blue (primary buttons / active tabs)
+    SKY_RADIANT = "#38bdf8"   # Radiant Sky Blue (focus, highlights, accents)
+    SKY_SOFT    = "#7dd3fc"   # Soft Sky Blue (subtle labels, headers)
+    SKY_TINT    = "#bae6fd"   # Pale Sky Blue tint
+    SKY_PRESS   = "#0284c7"   # Deep Sky Blue (pressed button state)
+    SKY_DARK    = "#0369a1"   # Deep Sky Blue border / dark backdrop
+
+    # Text Colors
+    TXT_BRIGHT  = "#f8fafc"   # Clean white/ice text
+    TXT_MUTED   = "#94a3b8"   # Slate text for secondary info
+    TXT_SUBTLE  = "#64748b"   # Dark slate for hints
+    TXT_ON_SKY  = "#030712"   # Contrast black text on sky blue buttons
+
+    # Typography
+    FONT_UI   = "Helvetica Neue" if sys.platform == "darwin" else ("Segoe UI" if sys.platform.startswith("win") else "DejaVu Sans")
+    FONT_MONO = "Menlo" if sys.platform == "darwin" else ("Consolas" if sys.platform.startswith("win") else "Courier New")
+
+    # Compatibility Aliases (strictly mapped to Black & Sky Blue / Slate)
+    ACCENT  = SKY_PRIMARY
+    ACCENT2 = SKY_RADIANT
+    TXT     = TXT_BRIGHT
+    TXT2    = TXT_MUTED
+    GREEN   = SKY_PRIMARY
+    RED     = TXT_MUTED
+    YELLOW  = SKY_SOFT
+    ORANGE  = SKY_RADIANT
 
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -478,7 +503,59 @@ class FalconSimulator:
         self._poll_log()
 
     # =========================================================================
-    # ✅  SAVE RESPONSE  — the ONE place active dicts are updated
+    # UI CONTROLS & GLASS STYLING HELPERS
+    # =========================================================================
+
+    def _create_button(self, parent, text, command, primary=False, width=None, padx=12, pady=5, **kw):
+        """Rounded rectangular button with Apple Vision Pro glass styling and hover state."""
+        bg_norm = self.SKY_PRIMARY if primary else self.CARD
+        fg_norm = self.TXT_ON_SKY if primary else self.TXT_BRIGHT
+        bg_hov  = self.SKY_RADIANT if primary else self.CARD_HOVER
+        fg_hov  = self.TXT_ON_SKY if primary else self.SKY_TINT
+        bdr_col = self.SKY_RADIANT if primary else self.BORDER
+
+        b = tk.Button(
+            parent, text=text, command=command,
+            bg=bg_norm, fg=fg_norm,
+            activebackground=self.SKY_PRESS if primary else self.PANEL_ALT,
+            activeforeground=fg_norm,
+            font=(self.FONT_UI, 10, "bold" if primary else "normal"),
+            relief="flat", bd=0,
+            highlightthickness=1, highlightbackground=bdr_col,
+            padx=padx, pady=pady, cursor="hand2", **kw
+        )
+        if width is not None:
+            b.config(width=width)
+
+        def on_enter(e):
+            if str(b["state"]) != "disabled":
+                b.config(bg=bg_hov, fg=fg_hov, highlightbackground=self.SKY_PRIMARY)
+        def on_leave(e):
+            if str(b["state"]) != "disabled":
+                b.config(bg=bg_norm, fg=fg_norm, highlightbackground=bdr_col)
+
+        b.bind("<Enter>", on_enter)
+        b.bind("<Leave>", on_leave)
+        return b
+
+    def _create_entry(self, parent, textvariable, width=12, justify="left", font_mono=True):
+        """Translucent glass entry field with sky-blue focus outline."""
+        f_fam = self.FONT_MONO if font_mono else self.FONT_UI
+        ent = tk.Entry(
+            parent, textvariable=textvariable, width=width,
+            bg=self.PANEL, fg=self.TXT_BRIGHT,
+            insertbackground=self.SKY_RADIANT,
+            selectbackground=self.SKY_PRIMARY,
+            selectforeground=self.TXT_ON_SKY,
+            relief="flat", bd=0,
+            highlightthickness=1, highlightbackground=self.BORDER,
+            highlightcolor=self.SKY_PRIMARY,
+            font=(f_fam, 10), justify=justify
+        )
+        return ent
+
+    # =========================================================================
+    # SAVE RESPONSE — updates active response dicts
     # =========================================================================
 
     def _save_response(self):
@@ -497,22 +574,20 @@ class FalconSimulator:
                 active[key] = var.get()
 
         self._set_save_state(True)
-        self._log("✅  Response saved — next request will use updated values.", "success")
+        self._log("Response saved — next request will use updated values.", "success")
 
     def _reset_response(self):
         """
         Reset ALL response fields (ISO 124 / 125 / 126 + EXT10 + Network) back to their
-        hardcoded DEFAULT_* values.  Both the UI StringVars and the active
+        hardcoded DEFAULT_* values. Both the UI StringVars and the active
         dicts (used for sending) are restored in one step.
         """
-        # ── Restore active dicts ──────────────────────────────────────────────
         self.active124          = copy.deepcopy(DEFAULT_ISO124)
         self.active125          = copy.deepcopy(DEFAULT_ISO125)
         self.active126          = copy.deepcopy(DEFAULT_ISO126)
         self.active_ext10_resp  = copy.deepcopy(DEFAULT_EXT10_RESPONSE)
         self.active_net         = copy.deepcopy(DEFAULT_NETWORK)
 
-        # ── Update every StringVar so the UI reflects the reset values ────────
         for default, svars in (
             (DEFAULT_ISO124,         self.svars124),
             (DEFAULT_ISO125,         self.svars125),
@@ -524,7 +599,7 @@ class FalconSimulator:
                 var.set(default.get(key, ""))
 
         self._set_save_state(True)
-        self._log("🔄  Response reset to defaults — all fields restored.", "warn")
+        self._log("Response reset to defaults — all fields restored.", "warn")
 
     def _apply_delay(self):
         """Read the delay Entry, validate, and store in self.response_delay_seconds."""
@@ -534,7 +609,6 @@ class FalconSimulator:
             if val < 0:
                 raise ValueError("negative")
         except ValueError:
-            # Reset Entry to last good value
             self.delay_var.set(f"{self.response_delay_seconds:g}")
             messagebox.showwarning(
                 "Invalid Delay",
@@ -542,29 +616,29 @@ class FalconSimulator:
             return
         self.response_delay_seconds = val
         if val == 0:
-            self._delay_indicator.config(text="INSTANT", fg=self.GREEN)
+            self._delay_indicator.config(text="INSTANT", fg=self.SKY_PRIMARY)
         else:
             self._delay_indicator.config(
-                text=f"{val:g}s delay", fg=self.YELLOW)
+                text=f"{val:g}s delay", fg=self.SKY_SOFT)
         self._log(
-            f"⏱  Response delay set to {val:g} second(s)."
-            + ("  (immediate responses)" if val == 0 else ""),
+            f"Response delay set to {val:g} second(s)."
+            + (" (immediate responses)" if val == 0 else ""),
             "info")
 
     def _set_immediate(self):
         """Reset delay to 0 (immediate response)."""
         self.response_delay_seconds = 0.0
         self.delay_var.set("0")
-        self._delay_indicator.config(text="INSTANT", fg=self.GREEN)
-        self._log("⚡  Response delay cleared — responses are now immediate.", "success")
+        self._delay_indicator.config(text="INSTANT", fg=self.SKY_PRIMARY)
+        self._log("Response delay cleared — responses are now immediate.", "success")
 
     def _set_save_state(self, saved: bool):
         if saved:
-            self.save_indicator.config(text="● saved", fg=self.GREEN)
-            self.save_resp_btn.config(bg="#40a02b", text="✅  Save Response")
+            self.save_indicator.config(text="Saved", fg=self.SKY_PRIMARY)
+            self.save_resp_btn.config(bg=self.SKY_PRIMARY, fg=self.TXT_ON_SKY, text="Save Response")
         else:
-            self.save_indicator.config(text="⚠ unsaved", fg=self.YELLOW)
-            self.save_resp_btn.config(bg="#c07000", text="✅  Save Response *")
+            self.save_indicator.config(text="Unsaved", fg=self.SKY_SOFT)
+            self.save_resp_btn.config(bg=self.SKY_PRESS, fg=self.TXT_ON_SKY, text="Save Response *")
 
     def _on_field_changed(self, *_):
         self._set_save_state(False)
@@ -696,8 +770,8 @@ class FalconSimulator:
         Runs in a separate thread so the GUI does not freeze while waiting for PING_RESPONSE.
         """
         if not self.running or self.client_conn is None:
-            self._log("⚠  Cannot send PING: No client connected to the simulator.", "warn")
-            self._update_ping_status("⚠ No client connected", self.YELLOW)
+            self._log("Cannot send PING: No client connected to the simulator.", "warn")
+            self._update_ping_status("No client connected", self.TXT_MUTED)
             return
 
         threading.Thread(target=self._do_send_ping, daemon=True).start()
@@ -714,10 +788,10 @@ class FalconSimulator:
         raw_req = self._build_network_ping_request()
         framed  = "00" + raw_req
 
-        self._update_ping_status("⏳ PING sent, waiting response…", self.YELLOW)
+        self._update_ping_status("PING sent, waiting response...", self.SKY_SOFT)
         self._log("─" * 55, "sep")
         self._log(
-            f"📡  Initiating PING_REQUEST to client ({len(framed)} bytes, tranCode={TRANCODE_PING_REQUEST})",
+            f"Initiating PING_REQUEST to client ({len(framed)} bytes, tranCode={TRANCODE_PING_REQUEST})",
             "info")
         self._log(f"RAW OUT ↓\n{raw_req}", "raw")
 
@@ -726,7 +800,7 @@ class FalconSimulator:
                 conn.sendall(framed.encode("ascii"))
         except Exception as ex:
             self._log(f"Failed to send PING_REQUEST: {ex}", "error")
-            self._update_ping_status(f"⛔ Send error: {ex}", self.RED)
+            self._update_ping_status(f"Send error: {ex}", self.TXT_MUTED)
             return
 
         # Wait up to 5.0 seconds for incoming PING_RESPONSE (Flow B)
@@ -735,16 +809,16 @@ class FalconSimulator:
             elapsed_ms = (time.time() - self._ping_start_time) * 1000.0
             resp_err = (self._last_ping_response.get("errorCode", "0000000000").strip()
                         if self._last_ping_response else "0000000000")
-            status_text = f"✅ PING OK ({elapsed_ms:.1f}ms) err=[{resp_err}]"
+            status_text = f"PING OK ({elapsed_ms:.1f}ms) err=[{resp_err}]"
             self._log(
-                f"🏓  PING transaction completed in {elapsed_ms:.1f}ms (errorCode=[{resp_err}])",
+                f"PING transaction completed in {elapsed_ms:.1f}ms (errorCode=[{resp_err}])",
                 "success")
-            self._update_ping_status(status_text, self.GREEN)
+            self._update_ping_status(status_text, self.SKY_PRIMARY)
         else:
             self._log(
-                f"⚠  PING timeout: No PING_RESPONSE ({TRANCODE_PING_RESPONSE}) received from REN within 5.0s",
+                f"PING timeout: No PING_RESPONSE ({TRANCODE_PING_RESPONSE}) received from REN within 5.0s",
                 "warn")
-            self._update_ping_status("⚠ PING TIMEOUT (5.0s)", self.RED)
+            self._update_ping_status("PING TIMEOUT (5.0s)", self.TXT_MUTED)
 
     def _safe_after(self, delay_ms: int, func):
         try:
@@ -768,123 +842,118 @@ class FalconSimulator:
         self._apply_styles()
 
         # ── Banner ────────────────────────────────────────────────────────────
-        banner = tk.Frame(self.root, bg="#11111b", height=52)
+        banner = tk.Frame(self.root, bg=self.PANEL, height=54)
         banner.pack(fill="x")
         banner.pack_propagate(False)
-        tk.Label(banner, text="🦅  EURONET FALCON TCP SIMULATOR",
-                 bg="#11111b", fg=self.ACCENT,
-                 font=("Consolas", 14, "bold")).pack(side="left", padx=20, pady=12)
-        tk.Label(banner, text="Developed by rsakhare@euronetworldwide.com      version 1.0.3",
-                 bg="#11111b", fg=self.TXT2,
-                 font=("Consolas", 10)).pack(side="left", padx=4)
-        self.dot = tk.Label(banner, text="●  STOPPED",
-                            bg="#11111b", fg=self.RED,
-                            font=("Consolas", 11, "bold"))
-        self.dot.pack(side="right", padx=20)
 
-        # ── Control bar ───────────────────────────────────────────────────────
-        ctrl = tk.Frame(self.root, bg=self.PANEL, height=62)
+        tk.Label(banner, text="🦅  EURONET FALCON TCP SIMULATOR",
+                 bg=self.PANEL, fg=self.SKY_RADIANT,
+                 font=(self.FONT_UI, 13, "bold")).pack(side="left", padx=20, pady=12)
+        tk.Label(banner, text="Developed by rsakhare@euronetworldwide.com      version 1.0.4",
+                 bg=self.PANEL, fg=self.TXT_MUTED,
+                 font=(self.FONT_MONO, 10)).pack(side="left", padx=4)
+
+        # Status indicator pill
+        pill = tk.Frame(banner, bg=self.CARD, highlightthickness=1,
+                        highlightbackground=self.BORDER, padx=10, pady=4)
+        pill.pack(side="right", padx=20)
+        self.dot = tk.Label(pill, text="STOPPED",
+                            bg=self.CARD, fg=self.TXT_MUTED,
+                            font=(self.FONT_MONO, 10, "bold"))
+        self.dot.pack()
+
+        # Banner glass divider line
+        tk.Frame(self.root, bg=self.BORDER, height=1).pack(fill="x")
+
+        # ── Control bar 1 ─────────────────────────────────────────────────────
+        ctrl = tk.Frame(self.root, bg=self.PANEL_ALT, height=58)
         ctrl.pack(fill="x")
         ctrl.pack_propagate(False)
 
         def lbl(t):
-            return tk.Label(ctrl, text=t, bg=self.PANEL, fg=self.TXT2,
-                            font=("Consolas", 10))
-        def ent(var, w):
-            return tk.Entry(ctrl, textvariable=var, width=w,
-                            bg=self.CARD, fg=self.TXT,
-                            insertbackground=self.TXT,
-                            relief="flat", font=("Consolas", 11), bd=2)
-        def btn(text, cmd, bg, fg="white", **kw):
-            return tk.Button(ctrl, text=text, command=cmd,
-                             bg=bg, fg=fg, font=("Consolas", 10, "bold"),
-                             relief="flat", padx=12, cursor="hand2", **kw)
+            return tk.Label(ctrl, text=t, bg=self.PANEL_ALT, fg=self.TXT_MUTED,
+                            font=(self.FONT_UI, 9, "bold"))
 
         lbl("Listen IP:").pack(side="left", padx=(16, 4), pady=16)
         self.ip_var = tk.StringVar(value="127.0.0.1")
-        ent(self.ip_var, 15).pack(side="left", padx=4)
+        self._create_entry(ctrl, self.ip_var, width=14).pack(side="left", padx=4)
+
         lbl("Port:").pack(side="left", padx=(10, 4))
         self.port_var = tk.StringVar(value="8070")
-        ent(self.port_var, 7).pack(side="left", padx=4)
+        self._create_entry(ctrl, self.port_var, width=7).pack(side="left", padx=4)
 
-        self.start_btn = btn("▶  START", self._start_server, "#40a02b")
-        self.start_btn.pack(side="left", padx=12)
-        self.stop_btn  = btn("■  STOP", self._stop_server, self.CARD,
-                             fg=self.RED, state="disabled")
-        self.stop_btn.pack(side="left", padx=2)
+        self.start_btn = self._create_button(ctrl, "START", self._start_server, primary=True, padx=16)
+        self.start_btn.pack(side="left", padx=(12, 4))
+
+        self.stop_btn  = self._create_button(ctrl, "STOP", self._stop_server, primary=False, state="disabled", padx=14)
+        self.stop_btn.pack(side="left", padx=4)
 
         # ── Response Delay controls ───────────────────────────────────────────
-        tk.Frame(ctrl, bg=self.BORDER, width=2).pack(
-            side="left", fill="y", pady=8, padx=(14, 4))
-        lbl("⏱ Delay (sec):").pack(side="left", padx=(4, 2))
+        tk.Frame(ctrl, bg=self.BORDER, width=1).pack(
+            side="left", fill="y", pady=10, padx=(14, 10))
+        lbl("Delay (sec):").pack(side="left", padx=(4, 4))
         self.delay_var = tk.StringVar(value="0")
-        self._delay_entry = tk.Entry(
-            ctrl, textvariable=self.delay_var, width=6,
-            bg=self.CARD, fg=self.ACCENT,
-            insertbackground=self.TXT,
-            relief="flat", font=("Consolas", 11, "bold"), bd=2,
-            justify="center")
-        self._delay_entry.pack(side="left", padx=2)
-        self._delay_entry.bind("<Return>",    lambda e: self._apply_delay())
-        self._delay_entry.bind("<FocusOut>",  lambda e: self._apply_delay())
-        btn("✅ Set", self._apply_delay, self.CARD, fg=self.GREEN
-            ).pack(side="left", padx=2)
-        btn("⚡ Immediate", self._set_immediate, "#1565c0", fg="#e3f2fd"
-            ).pack(side="left", padx=(2, 4))
+        self._delay_entry = self._create_entry(ctrl, self.delay_var, width=6, justify="center")
+        self._delay_entry.pack(side="left", padx=4)
+        self._delay_entry.bind("<Return>",   lambda e: self._apply_delay())
+        self._delay_entry.bind("<FocusOut>", lambda e: self._apply_delay())
+
+        self._create_button(ctrl, "Set", self._apply_delay, primary=False, padx=10).pack(side="left", padx=2)
+        self._create_button(ctrl, "Immediate", self._set_immediate, primary=False, padx=10).pack(side="left", padx=(2, 6))
+
         self._delay_indicator = tk.Label(
             ctrl, text="INSTANT",
-            bg=self.PANEL, fg=self.GREEN,
-            font=("Consolas", 9, "bold"))
-        self._delay_indicator.pack(side="left", padx=(0, 4))
+            bg=self.PANEL_ALT, fg=self.SKY_PRIMARY,
+            font=(self.FONT_MONO, 9, "bold"))
+        self._delay_indicator.pack(side="left", padx=(2, 8))
 
         # Right side (pack right-to-left)
-        btn("🗑  Clear Log",    self._clear_log,     self.CARD, fg=self.TXT2
-            ).pack(side="right", padx=12)
-        btn("📂  Load Template", self._load_template, self.CARD, fg=self.ACCENT2
-            ).pack(side="right", padx=4)
-        btn("💾  Save Template", self._save_template, self.CARD, fg=self.ACCENT2
-            ).pack(side="right", padx=4)
+        self._create_button(ctrl, "Clear Log", self._clear_log, primary=False, padx=12).pack(side="right", padx=12)
+        self._create_button(ctrl, "Save Template", self._save_template, primary=False, padx=10).pack(side="right", padx=4)
+        self._create_button(ctrl, "Load Template", self._load_template, primary=False, padx=10).pack(side="right", padx=4)
+
+        # Divider between ctrl and ctrl2
+        tk.Frame(self.root, bg=self.BORDER, height=1).pack(fill="x")
 
         # ── Save Response bar (second row — always fully visible) ─────────────
-        ctrl2 = tk.Frame(self.root, bg="#1a1a2e", height=46)
+        ctrl2 = tk.Frame(self.root, bg=self.PANEL, height=48)
         ctrl2.pack(fill="x")
         ctrl2.pack_propagate(False)
 
-        self.save_indicator = tk.Label(ctrl2, text="● saved", fg=self.GREEN,
-                                       bg="#1a1a2e",
-                                       font=("Consolas", 9, "bold"))
-        self.save_indicator.pack(side="left", padx=(16, 4), pady=12)
+        self.save_indicator = tk.Label(
+            ctrl2, text="Saved", fg=self.SKY_PRIMARY, bg=self.CARD,
+            highlightthickness=1, highlightbackground=self.BORDER,
+            font=(self.FONT_MONO, 9, "bold"), padx=8, pady=3)
+        self.save_indicator.pack(side="left", padx=(16, 6), pady=8)
 
-        self.save_resp_btn = tk.Button(
-            ctrl2, text="✅  Save Response", command=self._save_response,
-            bg="#40a02b", fg="white", font=("Consolas", 10, "bold"),
-            relief="flat", padx=18, cursor="hand2")
-        self.save_resp_btn.pack(side="left", padx=6, pady=7)
+        self.save_resp_btn = self._create_button(
+            ctrl2, "Save Response", self._save_response, primary=True, padx=18)
+        self.save_resp_btn.pack(side="left", padx=4, pady=8)
 
-        tk.Button(ctrl2, text="🔄  Reset", command=self._reset_response,
-                  bg=self.CARD, fg=self.YELLOW, font=("Consolas", 10, "bold"),
-                  relief="flat", padx=12, cursor="hand2"
-                  ).pack(side="left", padx=4, pady=7)
+        self.reset_btn = self._create_button(
+            ctrl2, "Reset", self._reset_response, primary=False, padx=12)
+        self.reset_btn.pack(side="left", padx=4, pady=8)
 
-        self.ping_btn = tk.Button(
-            ctrl2, text="📡  Send PING", command=self._send_ping_request,
-            bg="#1565c0", fg="#e3f2fd", font=("Consolas", 10, "bold"),
-            relief="flat", padx=14, cursor="hand2")
-        self.ping_btn.pack(side="left", padx=(10, 4), pady=7)
+        self.ping_btn = self._create_button(
+            ctrl2, "Send PING", self._send_ping_request, primary=False, padx=14)
+        self.ping_btn.pack(side="left", padx=(10, 4), pady=8)
 
         self.ping_status_lbl = tk.Label(
-            ctrl2, text="", bg="#1a1a2e", fg=self.GREEN,
-            font=("Consolas", 9, "bold"))
-        self.ping_status_lbl.pack(side="left", padx=4, pady=7)
+            ctrl2, text="", bg=self.PANEL, fg=self.SKY_PRIMARY,
+            font=(self.FONT_MONO, 9, "bold"))
+        self.ping_status_lbl.pack(side="left", padx=6, pady=8)
 
         tk.Label(ctrl2,
-                 text="  Edit fields in ISO 124/125/126, EXT10, or Network tabs, then click Save Response to apply for the next send.",
-                 bg="#1a1a2e", fg=self.TXT2, font=("Consolas", 9)
+                 text="Edit fields in ISO 124/125/126, EXT10, or Network tabs, then click Save Response to apply for the next send.",
+                 bg=self.PANEL, fg=self.TXT_MUTED, font=(self.FONT_UI, 9)
                  ).pack(side="left", padx=8)
+
+        # Divider below ctrl2
+        tk.Frame(self.root, bg=self.BORDER, height=1).pack(fill="x")
 
         # ── Main paned area ───────────────────────────────────────────────────
         pane = tk.PanedWindow(self.root, orient="horizontal",
-                              bg=self.BG, sashwidth=5, sashrelief="flat")
+                              bg=self.BG, sashwidth=4, sashrelief="flat")
         pane.pack(fill="both", expand=True)
 
         left  = tk.Frame(pane, bg=self.BG)
@@ -896,37 +965,37 @@ class FalconSimulator:
         nb.pack(fill="both", expand=True, padx=6, pady=6)
 
         t0 = tk.Frame(nb, bg=self.BG)
-        nb.add(t0, text="  📥 Incoming Request  ")
+        nb.add(t0, text="Incoming Request")
         self._build_request_tab(t0)
 
         t1 = tk.Frame(nb, bg=self.BG)
-        nb.add(t1, text="  ISO 124 (Header)  ")
+        nb.add(t1, text="ISO 124 (Header)")
         self._build_editor_tab(t1, "ISO 124 — Response Header",
                                DEFAULT_ISO124, ISO124_FIELDS, self.svars124)
 
         t2 = tk.Frame(nb, bg=self.BG)
-        nb.add(t2, text="  ISO 125 (Scores)  ")
+        nb.add(t2, text="ISO 125 (Scores)")
         self._build_editor_tab(t2, "ISO 125 — Falcon Score + Decision Response",
                                DEFAULT_ISO125, ISO125_FIELDS, self.svars125)
 
         t3 = tk.Frame(nb, bg=self.BG)
-        nb.add(t3, text="  ISO 126 (Decision overflow)  ")
+        nb.add(t3, text="ISO 126 (Decision Overflow)")
         self._build_editor_tab(t3, "ISO 126 — Decision Code 9 + Decision 10 + Scoring Server ID",
                                DEFAULT_ISO126, ISO126_FIELDS, self.svars126)
 
         # ── EXT10 response editor tab ─────────────────────────────────────────
         t4 = tk.Frame(nb, bg=self.BG)
-        nb.add(t4, text="  🔷 EXT10 Response  ")
+        nb.add(t4, text="EXT10 Response")
         self._build_ext10_editor_tab(t4)
 
         # ── Network Support Message (PING) tab ─────────────────────────────────
         t_net = tk.Frame(nb, bg=self.BG)
-        nb.add(t_net, text="  📡 Network (PING)  ")
+        nb.add(t_net, text="Network (PING)")
         self._build_network_tab(t_net)
 
         # ── Raw Data Parser tab ─────────────────────────────────────────────────
         t5 = tk.Frame(nb, bg=self.BG)
-        nb.add(t5, text="  🔍 Raw Parser  ")
+        nb.add(t5, text="Raw Parser")
         self._build_raw_parser_tab(t5)
 
         self._build_log_panel(right)
@@ -934,44 +1003,57 @@ class FalconSimulator:
     def _apply_styles(self):
         s = ttk.Style()
         s.theme_use("clam")
-        s.configure("TNotebook",     background=self.BG,   borderwidth=0)
-        s.configure("TNotebook.Tab", background=self.CARD, foreground=self.TXT2,
-                    padding=[14, 6], font=("Consolas", 10))
+        s.configure("TNotebook", background=self.BG, borderwidth=0, tabmargins=[4, 4, 4, 0])
+        s.configure("TNotebook.Tab",
+                    background=self.PANEL,
+                    foreground=self.TXT_MUTED,
+                    padding=[14, 6],
+                    font=(self.FONT_UI, 10, "bold"),
+                    borderwidth=0,
+                    focuscolor=self.BG)
         s.map("TNotebook.Tab",
-              background=[("selected", self.PANEL)],
-              foreground=[("selected", self.ACCENT)])
-        s.configure("TFrame",     background=self.BG)
-        s.configure("TScrollbar", background=self.CARD,
-                    troughcolor=self.PANEL, arrowcolor=self.TXT2)
+              background=[("selected", self.CARD), ("active", self.PANEL_ALT)],
+              foreground=[("selected", self.SKY_RADIANT), ("active", self.SKY_SOFT)])
+        s.configure("TFrame", background=self.BG)
+        s.configure("TScrollbar",
+                    background=self.CARD,
+                    troughcolor=self.PANEL,
+                    bordercolor=self.PANEL,
+                    arrowcolor=self.SKY_SOFT,
+                    relief="flat")
+        s.map("TScrollbar",
+              background=[("active", self.SKY_PRIMARY), ("!disabled", self.CARD)])
 
     # ── Request viewer tab ────────────────────────────────────────────────────
 
     def _build_request_tab(self, parent):
         top = tk.Frame(parent, bg=self.BG)
-        top.pack(fill="x", padx=8, pady=(6, 2))
+        top.pack(fill="x", padx=8, pady=(6, 4))
         tk.Label(top, text="Last received request — parsed fields",
-                 bg=self.BG, fg=self.TXT2, font=("Consolas", 9)).pack(side="left")
-        tk.Button(top, text="🗑  Clear", command=self._clear_request,
-                  bg=self.CARD, fg=self.RED, font=("Consolas", 9),
-                  relief="flat", padx=8, cursor="hand2").pack(side="right")
+                 bg=self.BG, fg=self.SKY_SOFT, font=(self.FONT_UI, 10, "bold")).pack(side="left")
+        self._create_button(top, "Clear", self._clear_request, primary=False, padx=10, pady=3).pack(side="right")
 
         self.req_text = scrolledtext.ScrolledText(
-            parent, bg=self.PANEL, fg=self.TXT, font=("Consolas", 10),
-            relief="flat", selectbackground=self.ACCENT,
-            selectforeground="#11111b", insertbackground=self.TXT,
-            state="disabled")
+            parent, bg=self.PANEL, fg=self.TXT_BRIGHT, font=(self.FONT_MONO, 10),
+            relief="flat", bd=0, highlightthickness=1, highlightbackground=self.BORDER,
+            selectbackground=self.SKY_PRIMARY, selectforeground=self.TXT_ON_SKY,
+            insertbackground=self.SKY_RADIANT, state="disabled")
         self.req_text.pack(fill="both", expand=True, padx=6, pady=(2, 6))
 
         for tag, fg, bold in [
-            ("sec",  self.ACCENT,  True),  ("fld",  self.ACCENT2, False),
-            ("val",  self.TXT,     False),  ("raw",  self.YELLOW,  False),
-            ("ts",   self.TXT2,    False),  ("sep",  self.BORDER,  False),
-            ("err",  self.RED,     False),  ("echo", self.GREEN,   False),
-            ("resv", self.ORANGE,  False),  # tag for RESERVED_01 highlight
+            ("sec",  self.SKY_RADIANT, True),
+            ("fld",  self.SKY_SOFT,    False),
+            ("val",  self.TXT_BRIGHT,  False),
+            ("raw",  self.SKY_TINT,    False),
+            ("ts",   self.TXT_MUTED,   False),
+            ("sep",  self.BORDER,      False),
+            ("err",  self.TXT_BRIGHT,  True),
+            ("echo", self.SKY_PRIMARY, False),
+            ("resv", self.TXT_MUTED,   False),
         ]:
             self.req_text.tag_configure(
                 tag, foreground=fg,
-                font=("Consolas", 10, "bold") if bold else ("Consolas", 10))
+                font=(self.FONT_MONO, 10, "bold") if bold else (self.FONT_MONO, 10))
 
     def _clear_request(self):
         self.req_text.config(state="normal")
@@ -984,21 +1066,20 @@ class FalconSimulator:
                           fields: list, var_dict: dict):
         """
         Scrollable field editor.
-        StringVars go into var_dict.  Any change marks response as unsaved.
+        StringVars go into var_dict. Any change marks response as unsaved.
         appDataLength is shown read-only (auto-computed on send).
         externalHeaderData is shown read-only (echoed from inbound request).
         """
         hf = tk.Frame(parent, bg=self.BG)
         hf.pack(fill="x", padx=8, pady=(6, 0))
-        tk.Label(hf, text=title, bg=self.BG, fg=self.ACCENT,
-                 font=("Consolas", 10, "bold")).pack(side="left")
+        tk.Label(hf, text=title, bg=self.BG, fg=self.SKY_RADIANT,
+                 font=(self.FONT_UI, 10, "bold")).pack(side="left")
 
-        note = tk.Frame(parent, bg="#2a2a3e", pady=4)
-        note.pack(fill="x", padx=8, pady=(2, 6))
+        note = tk.Frame(parent, bg=self.CARD, highlightthickness=1, highlightbackground=self.BORDER, pady=6, padx=10)
+        note.pack(fill="x", padx=8, pady=(4, 6))
         tk.Label(note,
-                 text="  ✏  Edit values, then click  ✅ Save Response  to apply."
-                      "  Fields are fixed-width — auto padded/trimmed on send.",
-                 bg="#2a2a3e", fg=self.YELLOW, font=("Consolas", 9)
+                 text="Edit values, then click Save Response to apply. Fields are fixed-width — auto padded/trimmed on send.",
+                 bg=self.CARD, fg=self.SKY_SOFT, font=(self.FONT_UI, 9)
                  ).pack(side="left")
 
         canvas = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
@@ -1022,13 +1103,13 @@ class FalconSimulator:
         canvas.bind("<Button-5>", lambda e: canvas.yview_scroll( 1, "units"))
 
         # Column headers
-        hdr = tk.Frame(inner, bg=self.CARD)
-        hdr.pack(fill="x", padx=2, pady=(2, 1))
+        hdr = tk.Frame(inner, bg=self.CARD, highlightthickness=1, highlightbackground=self.BORDER)
+        hdr.pack(fill="x", padx=2, pady=(2, 2))
         for col, w in [("Field Name", 32), ("Size", 6),
                        ("Active (sent)", 26), ("Edit value", 0)]:
-            tk.Label(hdr, text=col, bg=self.CARD, fg=self.ACCENT,
-                     font=("Consolas", 9, "bold"), width=w,
-                     anchor="w").pack(side="left", padx=6, pady=3)
+            tk.Label(hdr, text=col, bg=self.CARD, fg=self.SKY_RADIANT,
+                     font=(self.FONT_UI, 9, "bold"), width=w,
+                     anchor="w").pack(side="left", padx=6, pady=4)
 
         # Choose which active dict to read for the "Active" column
         if var_dict is self.svars124:
@@ -1040,18 +1121,19 @@ class FalconSimulator:
         else:
             active_src = self.active_ext10_resp
 
-        for name, size in fields:
+        for idx, (name, size) in enumerate(fields):
             default_val = defaults.get(name, "")
             active_val  = active_src.get(name, default_val)
             is_auto     = (name == "appDataLength")
             is_echo     = (name == "externalHeaderData" and var_dict is self.svars124)
             is_ext_len  = (name == "extHeaderLength"    and var_dict is self.svars124)
 
-            row = tk.Frame(inner, bg=self.PANEL)
+            row_bg = self.PANEL if (idx % 2 == 0) else self.PANEL_ALT
+            row = tk.Frame(inner, bg=row_bg)
             row.pack(fill="x", padx=2, pady=1)
 
-            tk.Label(row, text=name, bg=self.PANEL, fg=self.ACCENT2,
-                     font=("Consolas", 9), width=32, anchor="w"
+            tk.Label(row, text=name, bg=row_bg, fg=self.SKY_SOFT,
+                     font=(self.FONT_MONO, 9), width=32, anchor="w"
                      ).pack(side="left", padx=6)
 
             # Size column — show "dyn" for auto/dynamic fields, number for fixed
@@ -1060,8 +1142,8 @@ class FalconSimulator:
                 else "dyn"  if (is_echo or is_ext_len)
                 else str(size)
             )
-            tk.Label(row, text=size_display, bg=self.PANEL, fg=self.TXT2,
-                     font=("Consolas", 9), width=6, anchor="w"
+            tk.Label(row, text=size_display, bg=row_bg, fg=self.TXT_MUTED,
+                     font=(self.FONT_MONO, 9), width=6, anchor="w"
                      ).pack(side="left", padx=2)
 
             # Active value column
@@ -1070,9 +1152,9 @@ class FalconSimulator:
                           else "(dynamic from request)" if is_ext_len
                           else "(echoed from request)"  if is_echo
                           else repr(active_val),
-                     bg=self.PANEL,
-                     fg=self.TXT2 if (is_auto or is_echo or is_ext_len) else self.GREEN,
-                     font=("Consolas", 8), width=26, anchor="w"
+                     bg=row_bg,
+                     fg=self.TXT_MUTED if (is_auto or is_echo or is_ext_len) else self.SKY_PRIMARY,
+                     font=(self.FONT_MONO, 8), width=26, anchor="w"
                      ).pack(side="left", padx=4)
 
             # Edit column
@@ -1081,29 +1163,24 @@ class FalconSimulator:
 
             if is_auto:
                 tk.Label(row, text="auto — always recalculated on send",
-                         bg=self.PANEL, fg=self.TXT2,
-                         font=("Consolas", 9, "italic")
+                         bg=row_bg, fg=self.TXT_MUTED,
+                         font=(self.FONT_UI, 9, "italic")
                          ).pack(side="left", padx=8)
             elif is_ext_len:
                 tk.Label(row,
                          text="dynamic — echoed from inbound extHeaderLength",
-                         bg=self.PANEL, fg=self.YELLOW,
-                         font=("Consolas", 9, "italic")
+                         bg=row_bg, fg=self.SKY_SOFT,
+                         font=(self.FONT_UI, 9, "italic")
                          ).pack(side="left", padx=8)
             elif is_echo:
                 tk.Label(row, text="echoed from inbound externalHeaderData",
-                         bg=self.PANEL, fg=self.GREEN,
-                         font=("Consolas", 9, "italic")
+                         bg=row_bg, fg=self.SKY_PRIMARY,
+                         font=(self.FONT_UI, 9, "italic")
                          ).pack(side="left", padx=8)
             else:
-                # Attach change callback AFTER StringVar is created
                 var.trace_add("write", self._on_field_changed)
-                tk.Entry(row, textvariable=var,
-                         bg=self.CARD, fg=self.TXT,
-                         insertbackground=self.TXT, relief="flat",
-                         font=("Consolas", 9), width=60
-                         ).pack(side="left", padx=4, pady=2,
-                                fill="x", expand=True)
+                self._create_entry(row, var, width=60).pack(
+                    side="left", padx=4, pady=2, fill="x", expand=True)
 
     # ── EXT10 response editor tab ─────────────────────────────────────────────
 
@@ -1117,15 +1194,14 @@ class FalconSimulator:
         hf.pack(fill="x", padx=8, pady=(6, 0))
         tk.Label(hf,
                  text="EXT10 Response Body — sent automatically when an EXT10 request is received",
-                 bg=self.BG, fg=self.ACCENT,
-                 font=("Consolas", 10, "bold")).pack(side="left")
+                 bg=self.BG, fg=self.SKY_RADIANT,
+                 font=(self.FONT_UI, 10, "bold")).pack(side="left")
 
-        note = tk.Frame(parent, bg="#2a2a3e", pady=4)
-        note.pack(fill="x", padx=8, pady=(2, 6))
+        note = tk.Frame(parent, bg=self.CARD, highlightthickness=1, highlightbackground=self.BORDER, pady=6, padx=10)
+        note.pack(fill="x", padx=8, pady=(4, 6))
         tk.Label(note,
-                 text="  ✏  Edit 'Response' value, then click  ✅ Save Response  to apply."
-                      "  All other fields are echoed from the inbound EXT10 request.",
-                 bg="#2a2a3e", fg=self.YELLOW, font=("Consolas", 9)
+                 text="Edit 'Response' value, then click Save Response to apply. All other fields are echoed from the inbound EXT10 request.",
+                 bg=self.CARD, fg=self.SKY_SOFT, font=(self.FONT_UI, 9)
                  ).pack(side="left")
 
         canvas = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
@@ -1149,13 +1225,13 @@ class FalconSimulator:
         canvas.bind("<Button-5>", lambda e: canvas.yview_scroll( 1, "units"))
 
         # Column headers
-        hdr = tk.Frame(inner, bg=self.CARD)
-        hdr.pack(fill="x", padx=2, pady=(2, 1))
+        hdr = tk.Frame(inner, bg=self.CARD, highlightthickness=1, highlightbackground=self.BORDER)
+        hdr.pack(fill="x", padx=2, pady=(2, 2))
         for col, w in [("Field Name", 32), ("Size", 6),
                        ("Active (sent)", 26), ("Edit value", 0)]:
-            tk.Label(hdr, text=col, bg=self.CARD, fg=self.ACCENT,
-                     font=("Consolas", 9, "bold"), width=w,
-                     anchor="w").pack(side="left", padx=6, pady=3)
+            tk.Label(hdr, text=col, bg=self.CARD, fg=self.SKY_RADIANT,
+                     font=(self.FONT_UI, 9, "bold"), width=w,
+                     anchor="w").pack(side="left", padx=6, pady=4)
 
         # Fields auto-echoed verbatim from the EXT10 request body
         ECHOED_FROM_REQUEST = {
@@ -1165,28 +1241,29 @@ class FalconSimulator:
             "customerIdFromHeader", "customerAcctNumber", "externalTransactionId",
         }
 
-        for name, size in EXT10_RESPONSE_FIELDS:
+        for idx, (name, size) in enumerate(EXT10_RESPONSE_FIELDS):
             default_val = DEFAULT_EXT10_RESPONSE.get(name, "")
             active_val  = self.active_ext10_resp.get(name, default_val)
             is_echo     = name in ECHOED_FROM_REQUEST
 
-            row = tk.Frame(inner, bg=self.PANEL)
+            row_bg = self.PANEL if (idx % 2 == 0) else self.PANEL_ALT
+            row = tk.Frame(inner, bg=row_bg)
             row.pack(fill="x", padx=2, pady=1)
 
-            tk.Label(row, text=name, bg=self.PANEL, fg=self.ACCENT2,
-                     font=("Consolas", 9), width=32, anchor="w"
+            tk.Label(row, text=name, bg=row_bg, fg=self.SKY_SOFT,
+                     font=(self.FONT_MONO, 9), width=32, anchor="w"
                      ).pack(side="left", padx=6)
 
             tk.Label(row, text="echo" if is_echo else str(size),
-                     bg=self.PANEL, fg=self.TXT2,
-                     font=("Consolas", 9), width=6, anchor="w"
+                     bg=row_bg, fg=self.TXT_MUTED,
+                     font=(self.FONT_MONO, 9), width=6, anchor="w"
                      ).pack(side="left", padx=2)
 
             tk.Label(row,
                      text="(echoed from request)" if is_echo else repr(active_val),
-                     bg=self.PANEL,
-                     fg=self.TXT2 if is_echo else self.GREEN,
-                     font=("Consolas", 8), width=26, anchor="w"
+                     bg=row_bg,
+                     fg=self.TXT_MUTED if is_echo else self.SKY_PRIMARY,
+                     font=(self.FONT_MONO, 8), width=26, anchor="w"
                      ).pack(side="left", padx=4)
 
             var = tk.StringVar(value=str(default_val))
@@ -1194,17 +1271,13 @@ class FalconSimulator:
 
             if is_echo:
                 tk.Label(row, text="echoed from EXT10 request body (auto)",
-                         bg=self.PANEL, fg=self.GREEN,
-                         font=("Consolas", 9, "italic")
+                         bg=row_bg, fg=self.SKY_PRIMARY,
+                         font=(self.FONT_UI, 9, "italic")
                          ).pack(side="left", padx=8)
             else:
                 var.trace_add("write", self._on_field_changed)
-                tk.Entry(row, textvariable=var,
-                         bg=self.CARD, fg=self.TXT,
-                         insertbackground=self.TXT, relief="flat",
-                         font=("Consolas", 9), width=60
-                         ).pack(side="left", padx=4, pady=2,
-                                fill="x", expand=True)
+                self._create_entry(row, var, width=60).pack(
+                    side="left", padx=4, pady=2, fill="x", expand=True)
 
     # ── Network Support Message tab ───────────────────────────────────────────
 
@@ -1214,30 +1287,29 @@ class FalconSimulator:
         Displays all 7 network fields and provides an initiation button for Flow B.
         """
         top = tk.Frame(parent, bg=self.BG)
-        top.pack(fill="x", padx=8, pady=(6, 2))
-        tk.Label(top, text="📡  Network Support Message Configuration & PING Control",
-                 bg=self.BG, fg=self.ACCENT, font=("Consolas", 10, "bold")).pack(side="left")
+        top.pack(fill="x", padx=8, pady=(6, 4))
+        tk.Label(top, text="Network Support Message Configuration & PING Control",
+                 bg=self.BG, fg=self.SKY_RADIANT, font=(self.FONT_UI, 10, "bold")).pack(side="left")
 
-        self.tab_ping_btn = tk.Button(
-            top, text="📡  Send PING to REN", command=self._send_ping_request,
-            bg="#1565c0", fg="#e3f2fd", font=("Consolas", 10, "bold"),
-            relief="flat", padx=14, cursor="hand2")
+        self.tab_ping_btn = self._create_button(
+            top, "Send PING to REN", self._send_ping_request,
+            primary=True, padx=14, pady=3)
         self.tab_ping_btn.pack(side="right", padx=6)
 
         self.tab_ping_status_lbl = tk.Label(
-            top, text="● Ready", bg=self.BG, fg=self.GREEN, font=("Consolas", 9, "bold"))
+            top, text="Ready", bg=self.BG, fg=self.SKY_PRIMARY, font=(self.FONT_MONO, 9, "bold"))
         self.tab_ping_status_lbl.pack(side="right", padx=8)
 
         # Info card explaining Flow A and Flow B
-        info_frame = tk.Frame(parent, bg="#2a2a3e", pady=6)
-        info_frame.pack(fill="x", padx=8, pady=(2, 6))
+        info_frame = tk.Frame(parent, bg=self.CARD, highlightthickness=1, highlightbackground=self.BORDER, pady=8, padx=10)
+        info_frame.pack(fill="x", padx=8, pady=(4, 6))
         tk.Label(
             info_frame,
-            text="  Flow A (Inbound): When REN sends PING_REQUEST (100000060), Simulator automatically replies with PING_RESPONSE (200000060).\n"
-                 "  Flow B (Outbound): Click 'Send PING to REN' to transmit PING_REQUEST (100000060) and await PING_RESPONSE (200000060).\n"
-                 "  ✏ Edit fields below and click 'Save Response' to update active outbound values.",
-            bg="#2a2a3e", fg=self.YELLOW, font=("Consolas", 9), justify="left"
-        ).pack(side="left", padx=4)
+            text="Flow A (Inbound): When REN sends PING_REQUEST (100000060), Simulator automatically replies with PING_RESPONSE (200000060).\n"
+                 "Flow B (Outbound): Click 'Send PING to REN' to transmit PING_REQUEST (100000060) and await PING_RESPONSE (200000060).\n"
+                 "Edit fields below and click 'Save Response' to update active outbound values.",
+            bg=self.CARD, fg=self.SKY_SOFT, font=(self.FONT_UI, 9), justify="left"
+        ).pack(side="left")
 
         canvas = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
         sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
@@ -1260,37 +1332,38 @@ class FalconSimulator:
         canvas.bind("<Button-5>", lambda e: canvas.yview_scroll( 1, "units"))
 
         # Column headers
-        hdr = tk.Frame(inner, bg=self.CARD)
-        hdr.pack(fill="x", padx=2, pady=(2, 1))
+        hdr = tk.Frame(inner, bg=self.CARD, highlightthickness=1, highlightbackground=self.BORDER)
+        hdr.pack(fill="x", padx=2, pady=(2, 2))
         for col, w in [("Field Name", 32), ("Size", 6),
                        ("Active (sent)", 26), ("Edit value", 0)]:
-            tk.Label(hdr, text=col, bg=self.CARD, fg=self.ACCENT,
-                     font=("Consolas", 9, "bold"), width=w,
-                     anchor="w").pack(side="left", padx=6, pady=3)
+            tk.Label(hdr, text=col, bg=self.CARD, fg=self.SKY_RADIANT,
+                     font=(self.FONT_UI, 9, "bold"), width=w,
+                     anchor="w").pack(side="left", padx=6, pady=4)
 
         READ_ONLY_NET_FIELDS = {"appDataLength", "extHeaderLength"}
 
-        for name, size in NETWORK_FIELDS:
+        for idx, (name, size) in enumerate(NETWORK_FIELDS):
             default_val = DEFAULT_NETWORK.get(name, "")
             active_val  = self.active_net.get(name, default_val)
             is_ro       = name in READ_ONLY_NET_FIELDS
 
-            row = tk.Frame(inner, bg=self.PANEL)
+            row_bg = self.PANEL if (idx % 2 == 0) else self.PANEL_ALT
+            row = tk.Frame(inner, bg=row_bg)
             row.pack(fill="x", padx=2, pady=1)
 
-            tk.Label(row, text=name, bg=self.PANEL, fg=self.ACCENT2,
-                     font=("Consolas", 9), width=32, anchor="w"
+            tk.Label(row, text=name, bg=row_bg, fg=self.SKY_SOFT,
+                     font=(self.FONT_MONO, 9), width=32, anchor="w"
                      ).pack(side="left", padx=6)
 
-            tk.Label(row, text=str(size), bg=self.PANEL, fg=self.TXT2,
-                     font=("Consolas", 9), width=6, anchor="w"
+            tk.Label(row, text=str(size), bg=row_bg, fg=self.TXT_MUTED,
+                     font=(self.FONT_MONO, 9), width=6, anchor="w"
                      ).pack(side="left", padx=2)
 
             tk.Label(row,
                      text=repr(active_val),
-                     bg=self.PANEL,
-                     fg=self.TXT2 if is_ro else self.GREEN,
-                     font=("Consolas", 8), width=26, anchor="w"
+                     bg=row_bg,
+                     fg=self.TXT_MUTED if is_ro else self.SKY_PRIMARY,
+                     font=(self.FONT_MONO, 8), width=26, anchor="w"
                      ).pack(side="left", padx=4)
 
             var = tk.StringVar(value=str(default_val))
@@ -1298,19 +1371,13 @@ class FalconSimulator:
 
             if is_ro:
                 tk.Label(row, text=f"fixed ({default_val}) — always 0 for network messages",
-                         bg=self.PANEL, fg=self.TXT2,
-                         font=("Consolas", 9, "italic")
+                         bg=row_bg, fg=self.TXT_MUTED,
+                         font=(self.FONT_UI, 9, "italic")
                          ).pack(side="left", padx=8)
             else:
                 var.trace_add("write", self._on_field_changed)
-                tk.Entry(row, textvariable=var,
-                         bg=self.CARD, fg=self.TXT,
-                         insertbackground=self.TXT, relief="flat",
-                         font=("Consolas", 9), width=60
-                         ).pack(side="left", padx=4, pady=2,
-                                fill="x", expand=True)
-
-    # ── Log panel ─────────────────────────────────────────────────────────────
+                self._create_entry(row, var, width=60).pack(
+                    side="left", padx=4, pady=2, fill="x", expand=True)
 
     # ── Raw Data Parser tab ───────────────────────────────────────────────────
 
@@ -1322,48 +1389,45 @@ class FalconSimulator:
         """
         # ── Title + info bar ─────────────────────────────────────────────────
         hf = tk.Frame(parent, bg=self.BG)
-        hf.pack(fill="x", padx=8, pady=(6, 0))
-        tk.Label(hf, text="🔍  Raw Data Parser ",
-                 bg=self.BG, fg=self.ACCENT,
-                 font=("Consolas", 10, "bold")).pack(side="left")
+        hf.pack(fill="x", padx=8, pady=(6, 2))
+        tk.Label(hf, text="Raw Data Parser",
+                 bg=self.BG, fg=self.SKY_RADIANT,
+                 font=(self.FONT_UI, 10, "bold")).pack(side="left")
 
         # ── Options bar ──────────────────────────────────────────────────────
         opts = tk.Frame(parent, bg=self.BG)
         opts.pack(fill="x", padx=8, pady=(0, 4))
 
         # Format selector
-        tk.Label(opts, text="Input format:", bg=self.BG, fg=self.TXT2,
-                 font=("Consolas", 9)).pack(side="left", padx=(0, 6))
+        tk.Label(opts, text="Input format:", bg=self.BG, fg=self.TXT_MUTED,
+                 font=(self.FONT_UI, 9)).pack(side="left", padx=(0, 6))
         self._parser_fmt = tk.StringVar(value="ascii")
         for val, lbl_text in [("ascii", "ASCII"), ("hex", "HEX")]:
             tk.Radiobutton(
                 opts, text=lbl_text, variable=self._parser_fmt, value=val,
-                bg=self.BG, fg=self.TXT, selectcolor=self.CARD,
-                activebackground=self.BG, activeforeground=self.ACCENT,
-                font=("Consolas", 9), cursor="hand2"
+                bg=self.BG, fg=self.TXT_BRIGHT, selectcolor=self.CARD,
+                activebackground=self.BG, activeforeground=self.SKY_RADIANT,
+                font=(self.FONT_UI, 9), cursor="hand2"
             ).pack(side="left", padx=4)
 
-        # Prefix info label (auto-behaviour — no checkbox needed)
-        tk.Frame(opts, bg=self.BORDER, width=2).pack(
-            side="left", fill="y", pady=2, padx=(10, 6))        
-        
-        # Force-type override
-        tk.Frame(opts, bg=self.BORDER, width=2).pack(
+        tk.Frame(opts, bg=self.BORDER, width=1).pack(
             side="left", fill="y", pady=2, padx=(10, 6))
-        tk.Label(opts, text="Force type:", bg=self.BG, fg=self.TXT2,
-                 font=("Consolas", 9)).pack(side="left", padx=(0, 4))
+
+        # Force-type override
+        tk.Label(opts, text="Force type:", bg=self.BG, fg=self.TXT_MUTED,
+                 font=(self.FONT_UI, 9)).pack(side="left", padx=(0, 4))
         self._parser_force_type = tk.StringVar(value="auto")
         for val, lbl_text in [("auto", "Auto-detect"), ("DBTRAN25", "DBTran25"), ("EXT10", "EXT10"), ("NETWORK", "Network Support")]:
             tk.Radiobutton(
                 opts, text=lbl_text, variable=self._parser_force_type, value=val,
-                bg=self.BG, fg=self.TXT, selectcolor=self.CARD,
-                activebackground=self.BG, activeforeground=self.ACCENT,
-                font=("Consolas", 9), cursor="hand2"
+                bg=self.BG, fg=self.TXT_BRIGHT, selectcolor=self.CARD,
+                activebackground=self.BG, activeforeground=self.SKY_RADIANT,
+                font=(self.FONT_UI, 9), cursor="hand2"
             ).pack(side="left", padx=3)
 
         # ── Paned layout: input top, output bottom ────────────────────────────
         vpane = tk.PanedWindow(parent, orient="vertical",
-                               bg=self.BG, sashwidth=5, sashrelief="flat")
+                               bg=self.BG, sashwidth=4, sashrelief="flat")
         vpane.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
         # ── Input panel ──────────────────────────────────────────────────────
@@ -1371,32 +1435,27 @@ class FalconSimulator:
         vpane.add(inp_frame, minsize=120)
 
         inp_top = tk.Frame(inp_frame, bg=self.BG)
-        inp_top.pack(fill="x", pady=(2, 2))
-        tk.Label(inp_top, text="📋  Raw Input", bg=self.BG, fg=self.ACCENT2,
-                 font=("Consolas", 9, "bold")).pack(side="left")
+        inp_top.pack(fill="x", pady=(2, 4))
+        tk.Label(inp_top, text="Raw Input", bg=self.BG, fg=self.SKY_RADIANT,
+                 font=(self.FONT_UI, 9, "bold")).pack(side="left")
 
         # Byte counter label
         self._parser_byte_lbl = tk.Label(
-            inp_top, text="", bg=self.BG, fg=self.TXT2, font=("Consolas", 9))
+            inp_top, text="", bg=self.BG, fg=self.TXT_MUTED, font=(self.FONT_MONO, 9))
         self._parser_byte_lbl.pack(side="left", padx=12)
 
-        tk.Button(inp_top, text="🗑  Clear Input",
-                  command=self._clear_raw_input,
-                  bg=self.CARD, fg=self.RED,
-                  font=("Consolas", 9), relief="flat",
-                  padx=8, cursor="hand2").pack(side="right", padx=4)
+        self._create_button(inp_top, "Clear Input", self._clear_raw_input,
+                            primary=False, padx=8, pady=2).pack(side="right", padx=4)
 
-        tk.Button(inp_top, text="🔍  Parse",
-                  command=self._parse_raw_input,
-                  bg="#40a02b", fg="white",
-                  font=("Consolas", 10, "bold"), relief="flat",
-                  padx=14, cursor="hand2").pack(side="right", padx=4)
+        self._create_button(inp_top, "Parse", self._parse_raw_input,
+                            primary=True, padx=14, pady=2).pack(side="right", padx=4)
 
         self._parser_input = scrolledtext.ScrolledText(
-            inp_frame, bg="#11111b", fg=self.YELLOW,
-            font=("Consolas", 10), relief="flat",
-            selectbackground=self.ACCENT, selectforeground="#11111b",
-            insertbackground=self.TXT, height=8, wrap="char")
+            inp_frame, bg=self.PANEL, fg=self.SKY_TINT,
+            font=(self.FONT_MONO, 10), relief="flat", bd=0,
+            highlightthickness=1, highlightbackground=self.BORDER,
+            selectbackground=self.SKY_PRIMARY, selectforeground=self.TXT_ON_SKY,
+            insertbackground=self.SKY_RADIANT, height=8, wrap="char")
         self._parser_input.pack(fill="both", expand=True)
         self._parser_input.bind("<KeyRelease>", self._update_parser_byte_count)
 
@@ -1405,39 +1464,42 @@ class FalconSimulator:
         vpane.add(out_frame, minsize=200)
 
         out_top = tk.Frame(out_frame, bg=self.BG)
-        out_top.pack(fill="x", pady=(4, 2))
-        tk.Label(out_top, text="📊  Parsed Fields", bg=self.BG, fg=self.ACCENT2,
-                 font=("Consolas", 9, "bold")).pack(side="left")
+        out_top.pack(fill="x", pady=(4, 4))
+        tk.Label(out_top, text="Parsed Fields", bg=self.BG, fg=self.SKY_RADIANT,
+                 font=(self.FONT_UI, 9, "bold")).pack(side="left")
 
         self._parser_status_lbl = tk.Label(
-            out_top, text="", bg=self.BG, fg=self.TXT2, font=("Consolas", 9))
+            out_top, text="", bg=self.BG, fg=self.TXT_MUTED, font=(self.FONT_MONO, 9))
         self._parser_status_lbl.pack(side="left", padx=12)
 
-        tk.Button(out_top, text="🗑  Clear Output",
-                  command=self._clear_raw_output,
-                  bg=self.CARD, fg=self.RED,
-                  font=("Consolas", 9), relief="flat",
-                  padx=8, cursor="hand2").pack(side="right", padx=4)
+        self._create_button(out_top, "Clear Output", self._clear_raw_output,
+                            primary=False, padx=8, pady=2).pack(side="right", padx=4)
 
         self._parser_output = scrolledtext.ScrolledText(
-            out_frame, bg=self.PANEL, fg=self.TXT,
-            font=("Consolas", 10), relief="flat",
-            selectbackground=self.ACCENT, selectforeground="#11111b",
-            insertbackground=self.TXT, state="disabled", wrap="word")
+            out_frame, bg=self.PANEL, fg=self.TXT_BRIGHT,
+            font=(self.FONT_MONO, 10), relief="flat", bd=0,
+            highlightthickness=1, highlightbackground=self.BORDER,
+            selectbackground=self.SKY_PRIMARY, selectforeground=self.TXT_ON_SKY,
+            insertbackground=self.SKY_RADIANT, state="disabled", wrap="word")
         self._parser_output.pack(fill="both", expand=True)
 
-        # Reuse the same colour tags as req_text
         for tag, fg, bold in [
-            ("sec",  self.ACCENT,  True),  ("fld",  self.ACCENT2, False),
-            ("val",  self.TXT,     False),  ("raw",  self.YELLOW,  False),
-            ("ts",   self.TXT2,    False),  ("sep",  self.BORDER,  False),
-            ("err",  self.RED,     True),   ("echo", self.GREEN,   False),
-            ("resv", self.ORANGE,  False),  ("warn", self.YELLOW,  False),
-            ("ok",   self.GREEN,   True),   ("info", self.ACCENT2, False),
+            ("sec",  self.SKY_RADIANT, True),
+            ("fld",  self.SKY_SOFT,    False),
+            ("val",  self.TXT_BRIGHT,  False),
+            ("raw",  self.SKY_TINT,    False),
+            ("ts",   self.TXT_MUTED,   False),
+            ("sep",  self.BORDER,      False),
+            ("err",  self.TXT_BRIGHT,  True),
+            ("echo", self.SKY_PRIMARY, False),
+            ("resv", self.TXT_MUTED,   False),
+            ("warn", self.SKY_SOFT,    False),
+            ("ok",   self.SKY_PRIMARY, True),
+            ("info", self.SKY_SOFT,    False),
         ]:
             self._parser_output.tag_configure(
                 tag, foreground=fg,
-                font=("Consolas", 10, "bold") if bold else ("Consolas", 10))
+                font=(self.FONT_MONO, 10, "bold") if bold else (self.FONT_MONO, 10))
 
     def _update_parser_byte_count(self, _event=None):
         """Live byte counter shown next to the input label."""
@@ -1449,18 +1511,18 @@ class FalconSimulator:
                 n = len(bytes.fromhex(clean))
                 self._parser_byte_lbl.config(
                     text=f"{n} byte(s)  [{len(clean)//2*2} hex chars]",
-                    fg=self.GREEN)
+                    fg=self.SKY_PRIMARY)
             except ValueError:
                 self._parser_byte_lbl.config(
-                    text="⚠ invalid hex", fg=self.RED)
+                    text="invalid hex", fg=self.TXT_MUTED)
         else:
             n = len(raw.encode("ascii", errors="replace"))
             self._parser_byte_lbl.config(
-                text=f"{n} byte(s)", fg=self.TXT2)
+                text=f"{n} byte(s)", fg=self.TXT_MUTED)
 
     def _clear_raw_input(self):
         self._parser_input.delete("1.0", "end")
-        self._parser_byte_lbl.config(text="", fg=self.TXT2)
+        self._parser_byte_lbl.config(text="", fg=self.TXT_MUTED)
 
     def _clear_raw_output(self):
         self._parser_output.config(state="normal")
@@ -1574,12 +1636,12 @@ class FalconSimulator:
         out = self._parser_output
         out.config(state="normal")
         out.delete("1.0", "end")
-        out.insert("end", "⛔  Parse Error\n", "err")
+        out.insert("end", "Parse Error\n", "err")
         out.insert("end", "─" * 60 + "\n", "sep")
         out.insert("end", msg + "\n", "warn")
         out.config(state="disabled")
         out.see("1.0")
-        self._parser_status_lbl.config(text="⛔ Parse failed", fg=self.RED)
+        self._parser_status_lbl.config(text="Parse failed", fg=self.TXT_MUTED)
 
     def _display_parsed_raw(self, hdr: dict, body: dict, raw_str: str,
                             req_type: str, total_bytes: int,
@@ -1615,7 +1677,7 @@ class FalconSimulator:
             if k.startswith("_"):
                 tag = "err"
                 has_error = True
-                out.insert("end", f"  ⚠  {v}\n", tag)
+                out.insert("end", f"  {v}\n", tag)
                 continue
             out.insert("end", f"  {k:<44}", "fld")
             if k == "externalHeaderData":
@@ -1654,31 +1716,35 @@ class FalconSimulator:
         n_hdr  = sum(1 for k in hdr if not k.startswith("_"))
         n_body = len(body)
         if is_net:
-            status = f"✅ {n_hdr} network field(s)  |  {req_type}"
+            status = f"{n_hdr} network field(s)  |  {req_type}"
         else:
-            status = (f"✅ {n_hdr} header field(s)  +  {n_body} body field(s)  "
+            status = (f"{n_hdr} header field(s)  +  {n_body} body field(s)  "
                       f"|  {req_type}")
         self._parser_status_lbl.config(
-            text=status, fg=self.RED if has_error else self.GREEN)
+            text=status, fg=self.TXT_MUTED if has_error else self.SKY_PRIMARY)
 
     # ── Log panel ─────────────────────────────────────────────────────────────
 
     def _build_log_panel(self, parent):
-        tk.Label(parent, text="📋  Activity Log",
-                 bg=self.BG, fg=self.ACCENT,
-                 font=("Consolas", 11, "bold")).pack(anchor="w", padx=8, pady=(8, 2))
+        tk.Label(parent, text="Activity Log",
+                 bg=self.BG, fg=self.SKY_RADIANT,
+                 font=(self.FONT_UI, 11, "bold")).pack(anchor="w", padx=8, pady=(8, 4))
 
         self.log_text = scrolledtext.ScrolledText(
-            parent, bg=self.PANEL, fg=self.TXT, font=("Consolas", 10),
-            relief="flat", selectbackground=self.ACCENT,
-            selectforeground="#11111b", insertbackground=self.TXT,
-            state="disabled", wrap="word")
+            parent, bg=self.PANEL, fg=self.TXT_BRIGHT, font=(self.FONT_MONO, 10),
+            relief="flat", bd=0, highlightthickness=1, highlightbackground=self.BORDER,
+            selectbackground=self.SKY_PRIMARY, selectforeground=self.TXT_ON_SKY,
+            insertbackground=self.SKY_RADIANT, state="disabled", wrap="word")
         self.log_text.pack(fill="both", expand=True, padx=6, pady=(0, 6))
 
         for tag, fg in [
-            ("ts", self.TXT2), ("info", self.ACCENT2), ("success", self.GREEN),
-            ("error", self.RED), ("warn", self.YELLOW), ("raw", self.ORANGE),
-            ("sep", self.BORDER),
+            ("ts",      self.TXT_MUTED),
+            ("info",    self.SKY_SOFT),
+            ("success", self.SKY_PRIMARY),
+            ("error",   self.TXT_BRIGHT),
+            ("warn",    self.SKY_TINT),
+            ("raw",     self.SKY_RADIANT),
+            ("sep",     self.BORDER),
         ]:
             self.log_text.tag_configure(tag, foreground=fg)
 
@@ -1719,7 +1785,7 @@ class FalconSimulator:
         self.server_thread = threading.Thread(target=self._accept_loop, daemon=True)
         self.server_thread.start()
         self._log(f"Server started — listening on {ip}:{port}", "success")
-        self._set_dot(f"●  LISTENING  {ip}:{port}", self.GREEN)
+        self._set_dot(f"LISTENING  {ip}:{port}", self.SKY_PRIMARY)
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
 
@@ -1734,7 +1800,7 @@ class FalconSimulator:
         self.client_conn   = None
         self.server_socket = None
         self._log("Server stopped.", "warn")
-        self._set_dot("●  STOPPED", self.RED)
+        self._set_dot("STOPPED", self.TXT_MUTED)
         self.start_btn.config(state="normal")
         self.stop_btn.config(state="disabled")
 
@@ -1742,7 +1808,7 @@ class FalconSimulator:
         self._safe_after(0, lambda: self.dot.config(text=text, fg=colour))
 
     def _accept_loop(self):
-        self._log("Waiting for connection…", "info")
+        self._log("Waiting for connection...", "info")
         while self.running:
             try:
                 self.server_socket.settimeout(1.0)
@@ -1763,7 +1829,7 @@ class FalconSimulator:
             # If a second connection arrives while one is active, reject it.
             if self.client_conn is not None:
                 self._log(
-                    f"⛔  Rejected new connection from {cip}:{cport} "
+                    f"Rejected new connection from {cip}:{cport} "
                     f"— already serving an active client. Only 1 connection allowed.",
                     "warn")
                 try:
@@ -1773,14 +1839,14 @@ class FalconSimulator:
                 continue
 
             self._log(f"Client connected: {cip}:{cport}", "success")
-            self._set_dot(f"●  CONNECTED  {cip}:{cport}", self.ACCENT)
+            self._set_dot(f"CONNECTED  {cip}:{cport}", self.SKY_RADIANT)
             self.client_conn = conn
             self._handle_client(conn, addr)
             self._log(f"Client disconnected: {cip}:{cport}", "warn")
             self.client_conn = None
             self._set_dot(
-                f"●  LISTENING  {self._bound_ip}:{self._bound_port}",
-                self.GREEN)
+                f"LISTENING  {self._bound_ip}:{self._bound_port}",
+                self.SKY_PRIMARY)
 
     def _handle_client(self, conn: socket.socket, addr):
         buf = b""
@@ -1805,7 +1871,7 @@ class FalconSimulator:
                 # or fixed 52 bytes for Network Support Messages (e.g. PING).
                 min_to_read_ext_len = INBOUND_PREFIX_LEN + INBOUND_FIXED_BEFORE_EXT  # 54
                 if len(buf) < min_to_read_ext_len:
-                    self._log(f"Buffering… {len(buf)}/{min_to_read_ext_len}+ bytes", "info")
+                    self._log(f"Buffering... {len(buf)}/{min_to_read_ext_len}+ bytes", "info")
                     continue
 
                 # Inspect fixed header fields for message type determination
@@ -1833,7 +1899,7 @@ class FalconSimulator:
 
                 if len(buf) < actual_total:
                     self._log(
-                        f"Buffering… {len(buf)}/{actual_total} bytes "
+                        f"Buffering... {len(buf)}/{actual_total} bytes "
                         f"({'network message' if is_network_msg else f'extHeaderLength={ext_len}'})", "info")
                     continue   # keep reading, do NOT respond yet
 
@@ -1866,7 +1932,7 @@ class FalconSimulator:
                         self._last_ping_response = hdr_d
                         self._ping_event.set()
                         self._log(
-                            f"🏷  Request type detected: PING_RESPONSE "
+                            f"Request type detected: PING_RESPONSE "
                             f"(tranCode=[{tran_raw}], errorCode=[{hdr_d.get('errorCode', '').strip()}])", "success")
                         self._safe_after(0,
                             lambda h=hdr_d, b=body_d, r=raw:
@@ -1880,10 +1946,10 @@ class FalconSimulator:
                         self._last_request_type = f"NETWORK_{tran_raw}"
                     else:
                         self._last_request_type = "NETWORK_UNKNOWN"
-                        self._log(f"⚠  Unrecognized network tranCode: [{tran_raw}]", "warn")
+                        self._log(f"Unrecognized network tranCode: [{tran_raw}]", "warn")
 
                     self._log(
-                        f"🏷  Request type detected: {self._last_request_type}  "
+                        f"Request type detected: {self._last_request_type}  "
                         f"(tranCode=[{tran_raw}])", "info")
 
                     self._safe_after(0,
@@ -1900,15 +1966,15 @@ class FalconSimulator:
                         resp = self._build_network_response(hdr_d)
                         resp = resp[:12] + TRANCODE_START_SENDING_RESPONSE + resp[21:]
                     else:
-                        self._log(f"⚠  No response configured for tranCode [{tran_raw}] — handled safely", "warn")
+                        self._log(f"No response configured for tranCode [{tran_raw}] — handled safely", "warn")
                         continue
 
                     framed = "00" + resp
                     delay = self.response_delay_seconds
                     if delay > 0:
                         self._log(
-                            f"⏳  Waiting {delay:g}s before sending "
-                            f"{self._last_request_type} response…", "warn")
+                            f"Waiting {delay:g}s before sending "
+                            f"{self._last_request_type} response...", "warn")
                         time.sleep(delay)
 
                     try:
@@ -1916,7 +1982,7 @@ class FalconSimulator:
                             conn.sendall(framed.encode("ascii"))
                         delay_note = f" (after {delay:g}s delay)" if delay > 0 else ""
                         self._log(
-                            f"✅  {self._last_request_type} Response sent "
+                            f"{self._last_request_type} Response sent "
                             f"({len(framed)} bytes, incl. 2-byte '00' prefix) "
                             f"— 1 response per request{delay_note}",
                             "success")
@@ -1943,7 +2009,7 @@ class FalconSimulator:
                 else:
                     self._last_request_type = "DBTRAN25"
                 self._log(
-                    f"🏷  Request type detected: {self._last_request_type}  "
+                    f"Request type detected: {self._last_request_type}  "
                     f"(tranCode=[{tran_raw}])", "info")
 
                 # ── Echo-back: capture externalHeaderData + extHeaderLength ──
@@ -1961,7 +2027,7 @@ class FalconSimulator:
                         self._last_ext_header_length = raw_hl.zfill(4)[:4]
 
                     self._log(
-                        f"📋  externalHeaderData: [{self._last_external_header_data.strip()}]  "
+                        f"externalHeaderData: [{self._last_external_header_data.strip()}]  "
                         f"|  extHeaderLength from request: [{raw_hl}]  "
                         f"→  will echo [{self._last_ext_header_length}]",
                         "info")
@@ -1990,8 +2056,8 @@ class FalconSimulator:
                 delay = self.response_delay_seconds
                 if delay > 0:
                     self._log(
-                        f"⏳  Waiting {delay:g}s before sending "
-                        f"{self._last_request_type} response…", "warn")
+                        f"Waiting {delay:g}s before sending "
+                        f"{self._last_request_type} response...", "warn")
                     time.sleep(delay)
 
                 try:
@@ -1999,7 +2065,7 @@ class FalconSimulator:
                         conn.sendall(framed.encode("ascii"))
                     delay_note = f" (after {delay:g}s delay)" if delay > 0 else ""
                     self._log(
-                        f"✅  {self._last_request_type} Response sent "
+                        f"{self._last_request_type} Response sent "
                         f"({len(framed)} bytes, incl. 2-byte '00' prefix) "
                         f"— 1 response per request{delay_note}",
                         "success")
@@ -2064,7 +2130,7 @@ class FalconSimulator:
         body_start = INBOUND_FIXED_BEFORE_EXT + ext_len + INBOUND_RESERVED_SIZE
 
         self._log(
-            f"🔍  Parse offsets — fixed_hdr={INBOUND_FIXED_BEFORE_EXT}"
+            f"Parse offsets — fixed_hdr={INBOUND_FIXED_BEFORE_EXT}"
             f"  ext_len={ext_len}"
             f"  reserved={INBOUND_RESERVED_SIZE}"
             f"  body_start={body_start}"
@@ -2099,18 +2165,18 @@ class FalconSimulator:
             self._last_request_type in ("PING_REQUEST", "PING_RESPONSE") or
             self._last_request_type.startswith("NETWORK")
         )
-        sec_title = f"\n▸ NETWORK SUPPORT MESSAGE  ({self._last_request_type})\n" if is_net else "\n▸ HEADER  (ISO 124 incoming)\n"
+        sec_title = f"\n[NETWORK SUPPORT MESSAGE  ({self._last_request_type})]\n" if is_net else "\n[HEADER  (ISO 124 incoming)]\n"
         self.req_text.insert("end", sec_title, "sec")
 
         for k, v in hdr.items():
             if k.startswith("_"):
                 tag = "err" if k == "_error" else "warn"
-                self.req_text.insert("end", f"  ⚠  {v}\n", tag)
+                self.req_text.insert("end", f"  {v}\n", tag)
                 continue
             self.req_text.insert("end", f"  {k:<44}", "fld")
             if k == "externalHeaderData":
                 self.req_text.insert(
-                    "end", f"  [{v.strip()}]  ← will be echoed in response\n", "echo")
+                    "end", f"  [{v.strip()}]  (will be echoed in response)\n", "echo")
             elif k == "RESERVED_01":
                 self.req_text.insert(
                     "end", f"  [{v}]  (reserved — not echoed)\n", "resv")
@@ -2131,11 +2197,7 @@ class FalconSimulator:
             _rtype = self._last_request_type
             self.req_text.insert(
                 "end",
-                f"\n▸ BODY  ({_rtype} Request)"
-                f"  — raw byte offset {_bstart}"
-                f"  (fixed={INBOUND_FIXED_BEFORE_EXT}"
-                f" + extLen={_ext_diag}"
-                f" + reserved={INBOUND_RESERVED_SIZE})\n",
+                f"\n[BODY  ({_rtype} Request) — raw byte offset {_bstart} (fixed={INBOUND_FIXED_BEFORE_EXT} + extLen={_ext_diag} + reserved={INBOUND_RESERVED_SIZE})]\n",
                 "sec")
             for k, v in body.items():
                 self.req_text.insert("end", f"  {k:<44}", "fld")
