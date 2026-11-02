@@ -240,6 +240,55 @@ TRANCODE_DBTRAN25 = "100000101"
 TRANCODE_EXT10    = "100000110"
 
 # =============================================================================
+# NETWORK SUPPORT MESSAGE DEFINITIONS
+# =============================================================================
+
+# Defined in REN application's FalconPlugin.cpp (vcNetworkFields)
+# Total size = 8 + 4 + 9 + 10 + 10 + 10 + 1 = 52 characters
+NETWORK_FIELDS = [
+    ("appDataLength",           8),
+    ("extHeaderLength",         4),
+    ("tranCode",                9),
+    ("sourceApplication",      10),
+    ("destinationApplication", 10),
+    ("errorCode",              10),
+    ("filler",                  1),
+]
+NETWORK_MESSAGE_SIZE = sum(s for _, s in NETWORK_FIELDS)  # 52
+
+# Transaction codes defined in the REN application
+TRANCODE_PING_REQUEST           = "100000060"
+TRANCODE_PING_RESPONSE          = "200000060"
+TRANCODE_STOP_SENDING_REQUEST   = "100000050"
+TRANCODE_STOP_SENDING_RESPONSE  = "200000050"
+TRANCODE_START_SENDING_REQUEST  = "100000051"
+TRANCODE_START_SENDING_RESPONSE = "200000051"
+TRANCODE_FALCON_SHUTTING_DOWN   = "000000052"
+TRANCODE_FALCON_UNAVAILABLE     = "000000053"
+
+NETWORK_TRANCODES = {
+    TRANCODE_PING_REQUEST,
+    TRANCODE_PING_RESPONSE,
+    TRANCODE_STOP_SENDING_REQUEST,
+    TRANCODE_STOP_SENDING_RESPONSE,
+    TRANCODE_START_SENDING_REQUEST,
+    TRANCODE_START_SENDING_RESPONSE,
+    TRANCODE_FALCON_SHUTTING_DOWN,
+    TRANCODE_FALCON_UNAVAILABLE,
+}
+
+# Default Network Support Message values
+DEFAULT_NETWORK = {
+    "appDataLength":          "00000000",
+    "extHeaderLength":        "0000",
+    "tranCode":               TRANCODE_PING_REQUEST,
+    "sourceApplication":      "PMAX      ",
+    "destinationApplication": "IDFCTANGO ",
+    "errorCode":              "0000000000",
+    "filler":                 " ",
+}
+
+# =============================================================================
 # DEFAULT RESPONSE VALUES — DBTRAN25
 # =============================================================================
 
@@ -337,6 +386,25 @@ def parse_fields(raw: str, fields: list) -> dict:
     return result
 
 
+def parse_network_message(raw: str) -> tuple:
+    """
+    Parse a 52-character Network Support Message into its fields.
+    Returns (header_dict, empty_body_dict).
+    """
+    hdr, body = {}, {}
+    # If 51 characters (trailing filler space stripped by clipboard or whitespace trim), pad filler space
+    if len(raw) == NETWORK_MESSAGE_SIZE - 1:
+        raw = raw + " "
+
+    if len(raw) < NETWORK_MESSAGE_SIZE:
+        hdr["_error"] = f"Network message too short ({len(raw)} < {NETWORK_MESSAGE_SIZE} bytes)"
+        return hdr, body
+    if len(raw) > NETWORK_MESSAGE_SIZE:
+        hdr["_warn"] = f"Network message has extra bytes ({len(raw)} > {NETWORK_MESSAGE_SIZE})"
+    hdr.update(parse_fields(raw[:NETWORK_MESSAGE_SIZE], NETWORK_FIELDS))
+    return hdr, body
+
+
 # =============================================================================
 # MAIN APPLICATION
 # =============================================================================
@@ -374,13 +442,21 @@ class FalconSimulator:
         # ── Response delay (seconds) — 0 = immediate ──────────────────────────
         self.response_delay_seconds: float = 0.0
 
+        # ── Thread-safety lock for sending messages over socket ───────────────
+        self._send_lock = threading.Lock()
+
+        # ── Network PING tracking ─────────────────────────────────────────────
+        self._ping_event         = threading.Event()
+        self._last_ping_response = None
+        self._ping_start_time    = 0.0
+
         # ── Last received externalHeaderData + extHeaderLength for echo-back ─
         # Updated every time a request is parsed; used in _build_response()
         self._last_external_header_data: str = "DBTRAN251718532397  "
         self._last_ext_header_length:    str = "0020"   # echoed dynamically from request
 
         # ── Last detected request type ────────────────────────────────────────
-        # "DBTRAN25" or "EXT10" — set in _handle_client, read in _build_response
+        # "DBTRAN25", "EXT10", "PING_REQUEST", "PING_RESPONSE"
         self._last_request_type: str = "DBTRAN25"
 
         # ── ACTIVE response dicts ─────────────────────────────────────────────
@@ -389,12 +465,14 @@ class FalconSimulator:
         self.active125:         dict = copy.deepcopy(DEFAULT_ISO125)
         self.active126:         dict = copy.deepcopy(DEFAULT_ISO126)
         self.active_ext10_resp: dict = copy.deepcopy(DEFAULT_EXT10_RESPONSE)
+        self.active_net:        dict = copy.deepcopy(DEFAULT_NETWORK)
 
         # ── UI StringVar dicts (live editing, NOT used for sending) ───────────
         self.svars124:         dict = {}
         self.svars125:         dict = {}
         self.svars126:         dict = {}
         self.svars_ext10_resp: dict = {}
+        self.svars_net:        dict = {}
 
         self._build_ui()
         self._poll_log()
@@ -413,6 +491,7 @@ class FalconSimulator:
             (self.svars125,         self.active125),
             (self.svars126,         self.active126),
             (self.svars_ext10_resp, self.active_ext10_resp),
+            (self.svars_net,        self.active_net),
         ):
             for key, var in svars.items():
                 active[key] = var.get()
@@ -422,7 +501,7 @@ class FalconSimulator:
 
     def _reset_response(self):
         """
-        Reset ALL response fields (ISO 124 / 125 / 126 + EXT10) back to their
+        Reset ALL response fields (ISO 124 / 125 / 126 + EXT10 + Network) back to their
         hardcoded DEFAULT_* values.  Both the UI StringVars and the active
         dicts (used for sending) are restored in one step.
         """
@@ -431,6 +510,7 @@ class FalconSimulator:
         self.active125          = copy.deepcopy(DEFAULT_ISO125)
         self.active126          = copy.deepcopy(DEFAULT_ISO126)
         self.active_ext10_resp  = copy.deepcopy(DEFAULT_EXT10_RESPONSE)
+        self.active_net         = copy.deepcopy(DEFAULT_NETWORK)
 
         # ── Update every StringVar so the UI reflects the reset values ────────
         for default, svars in (
@@ -438,6 +518,7 @@ class FalconSimulator:
             (DEFAULT_ISO125,         self.svars125),
             (DEFAULT_ISO126,         self.svars126),
             (DEFAULT_EXT10_RESPONSE, self.svars_ext10_resp),
+            (DEFAULT_NETWORK,        self.svars_net),
         ):
             for key, var in svars.items():
                 var.set(default.get(key, ""))
@@ -559,6 +640,127 @@ class FalconSimulator:
         return iso124 + app_data
 
     # =========================================================================
+    # NETWORK SUPPORT MESSAGE BUILDERS & PING INITIATION
+    # =========================================================================
+
+    def _build_network_response(self, req_hdr: dict) -> str:
+        """
+        Build a 52-character PING_RESPONSE (200000060) answering an inbound PING_REQUEST.
+        Echoes application routing names (swapping destinationApplication to sourceApplication,
+        and sourceApplication to destinationApplication) as per Falcon/REN protocol standards.
+        """
+        s_net = self.active_net
+        tran_code = TRANCODE_PING_RESPONSE
+        # Echo-swap application identifiers
+        req_dst = req_hdr.get("destinationApplication", "").strip()
+        src_app = fw(req_dst if req_dst else s_net.get("sourceApplication", "PMAX      "), 10)
+        req_src = req_hdr.get("sourceApplication", "").strip()
+        dst_app = fw(req_src if req_src else s_net.get("destinationApplication", "IDFCTANGO "), 10)
+        err_code = fw(s_net.get("errorCode", "0000000000"), 10)
+        filler   = fw(s_net.get("filler", " "), 1)
+
+        return (
+            "00000000" +  # appDataLength (8)
+            "0000" +      # extHeaderLength (4)
+            tran_code +   # tranCode (9)
+            src_app +     # sourceApplication (10)
+            dst_app +     # destinationApplication (10)
+            err_code +    # errorCode (10)
+            filler        # filler (1)
+        )
+
+    def _build_network_ping_request(self) -> str:
+        """
+        Build a 52-character PING_REQUEST (100000060) to send to REN.
+        """
+        s_net = self.active_net
+        tran_code = TRANCODE_PING_REQUEST
+        src_app   = fw(s_net.get("sourceApplication", "PMAX      "), 10)
+        dst_app   = fw(s_net.get("destinationApplication", "IDFCTANGO "), 10)
+        err_code  = fw(s_net.get("errorCode", "0000000000"), 10)
+        filler    = fw(s_net.get("filler", " "), 1)
+
+        return (
+            "00000000" +  # appDataLength (8)
+            "0000" +      # extHeaderLength (4)
+            tran_code +   # tranCode (9)
+            src_app +     # sourceApplication (10)
+            dst_app +     # destinationApplication (10)
+            err_code +    # errorCode (10)
+            filler        # filler (1)
+        )
+
+    def _send_ping_request(self):
+        """
+        Initiate a Network Support PING_REQUEST (100000060) to the connected REN client.
+        Runs in a separate thread so the GUI does not freeze while waiting for PING_RESPONSE.
+        """
+        if not self.running or self.client_conn is None:
+            self._log("⚠  Cannot send PING: No client connected to the simulator.", "warn")
+            self._update_ping_status("⚠ No client connected", self.YELLOW)
+            return
+
+        threading.Thread(target=self._do_send_ping, daemon=True).start()
+
+    def _do_send_ping(self):
+        conn = self.client_conn
+        if conn is None:
+            return
+
+        self._ping_event.clear()
+        self._last_ping_response = None
+        self._ping_start_time = time.time()
+
+        raw_req = self._build_network_ping_request()
+        framed  = "00" + raw_req
+
+        self._update_ping_status("⏳ PING sent, waiting response…", self.YELLOW)
+        self._log("─" * 55, "sep")
+        self._log(
+            f"📡  Initiating PING_REQUEST to client ({len(framed)} bytes, tranCode={TRANCODE_PING_REQUEST})",
+            "info")
+        self._log(f"RAW OUT ↓\n{raw_req}", "raw")
+
+        try:
+            with self._send_lock:
+                conn.sendall(framed.encode("ascii"))
+        except Exception as ex:
+            self._log(f"Failed to send PING_REQUEST: {ex}", "error")
+            self._update_ping_status(f"⛔ Send error: {ex}", self.RED)
+            return
+
+        # Wait up to 5.0 seconds for incoming PING_RESPONSE (Flow B)
+        responded = self._ping_event.wait(timeout=5.0)
+        if responded:
+            elapsed_ms = (time.time() - self._ping_start_time) * 1000.0
+            resp_err = (self._last_ping_response.get("errorCode", "0000000000").strip()
+                        if self._last_ping_response else "0000000000")
+            status_text = f"✅ PING OK ({elapsed_ms:.1f}ms) err=[{resp_err}]"
+            self._log(
+                f"🏓  PING transaction completed in {elapsed_ms:.1f}ms (errorCode=[{resp_err}])",
+                "success")
+            self._update_ping_status(status_text, self.GREEN)
+        else:
+            self._log(
+                f"⚠  PING timeout: No PING_RESPONSE ({TRANCODE_PING_RESPONSE}) received from REN within 5.0s",
+                "warn")
+            self._update_ping_status("⚠ PING TIMEOUT (5.0s)", self.RED)
+
+    def _safe_after(self, delay_ms: int, func):
+        try:
+            self.root.after(delay_ms, func)
+        except Exception:
+            pass
+
+    def _update_ping_status(self, text: str, fg: str):
+        def _update():
+            if hasattr(self, "ping_status_lbl"):
+                self.ping_status_lbl.config(text=text, fg=fg)
+            if hasattr(self, "tab_ping_status_lbl"):
+                self.tab_ping_status_lbl.config(text=text, fg=fg)
+        self._safe_after(0, _update)
+
+    # =========================================================================
     # UI CONSTRUCTION
     # =========================================================================
 
@@ -664,8 +866,19 @@ class FalconSimulator:
                   relief="flat", padx=12, cursor="hand2"
                   ).pack(side="left", padx=4, pady=7)
 
+        self.ping_btn = tk.Button(
+            ctrl2, text="📡  Send PING", command=self._send_ping_request,
+            bg="#1565c0", fg="#e3f2fd", font=("Consolas", 10, "bold"),
+            relief="flat", padx=14, cursor="hand2")
+        self.ping_btn.pack(side="left", padx=(10, 4), pady=7)
+
+        self.ping_status_lbl = tk.Label(
+            ctrl2, text="", bg="#1a1a2e", fg=self.GREEN,
+            font=("Consolas", 9, "bold"))
+        self.ping_status_lbl.pack(side="left", padx=4, pady=7)
+
         tk.Label(ctrl2,
-                 text="  Edit fields in the ISO 124 / 125 / 126 or EXT10 tabs, then click Save Response to apply for the next request.",
+                 text="  Edit fields in ISO 124/125/126, EXT10, or Network tabs, then click Save Response to apply for the next send.",
                  bg="#1a1a2e", fg=self.TXT2, font=("Consolas", 9)
                  ).pack(side="left", padx=8)
 
@@ -705,6 +918,11 @@ class FalconSimulator:
         t4 = tk.Frame(nb, bg=self.BG)
         nb.add(t4, text="  🔷 EXT10 Response  ")
         self._build_ext10_editor_tab(t4)
+
+        # ── Network Support Message (PING) tab ─────────────────────────────────
+        t_net = tk.Frame(nb, bg=self.BG)
+        nb.add(t_net, text="  📡 Network (PING)  ")
+        self._build_network_tab(t_net)
 
         # ── Raw Data Parser tab ─────────────────────────────────────────────────
         t5 = tk.Frame(nb, bg=self.BG)
@@ -988,6 +1206,110 @@ class FalconSimulator:
                          ).pack(side="left", padx=4, pady=2,
                                 fill="x", expand=True)
 
+    # ── Network Support Message tab ───────────────────────────────────────────
+
+    def _build_network_tab(self, parent):
+        """
+        Dedicated editor and status tab for Network Support Messages (PING).
+        Displays all 7 network fields and provides an initiation button for Flow B.
+        """
+        top = tk.Frame(parent, bg=self.BG)
+        top.pack(fill="x", padx=8, pady=(6, 2))
+        tk.Label(top, text="📡  Network Support Message Configuration & PING Control",
+                 bg=self.BG, fg=self.ACCENT, font=("Consolas", 10, "bold")).pack(side="left")
+
+        self.tab_ping_btn = tk.Button(
+            top, text="📡  Send PING to REN", command=self._send_ping_request,
+            bg="#1565c0", fg="#e3f2fd", font=("Consolas", 10, "bold"),
+            relief="flat", padx=14, cursor="hand2")
+        self.tab_ping_btn.pack(side="right", padx=6)
+
+        self.tab_ping_status_lbl = tk.Label(
+            top, text="● Ready", bg=self.BG, fg=self.GREEN, font=("Consolas", 9, "bold"))
+        self.tab_ping_status_lbl.pack(side="right", padx=8)
+
+        # Info card explaining Flow A and Flow B
+        info_frame = tk.Frame(parent, bg="#2a2a3e", pady=6)
+        info_frame.pack(fill="x", padx=8, pady=(2, 6))
+        tk.Label(
+            info_frame,
+            text="  Flow A (Inbound): When REN sends PING_REQUEST (100000060), Simulator automatically replies with PING_RESPONSE (200000060).\n"
+                 "  Flow B (Outbound): Click 'Send PING to REN' to transmit PING_REQUEST (100000060) and await PING_RESPONSE (200000060).\n"
+                 "  ✏ Edit fields below and click 'Save Response' to update active outbound values.",
+            bg="#2a2a3e", fg=self.YELLOW, font=("Consolas", 9), justify="left"
+        ).pack(side="left", padx=4)
+
+        canvas = tk.Canvas(parent, bg=self.BG, highlightthickness=0)
+        sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        canvas.pack(fill="both", expand=True, padx=6, pady=2)
+
+        inner = tk.Frame(canvas, bg=self.BG)
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _resize(e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfig(win_id, width=canvas.winfo_width())
+
+        inner.bind("<Configure>", _resize)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win_id, width=e.width))
+        canvas.bind("<MouseWheel>",
+                    lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        canvas.bind("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        canvas.bind("<Button-5>", lambda e: canvas.yview_scroll( 1, "units"))
+
+        # Column headers
+        hdr = tk.Frame(inner, bg=self.CARD)
+        hdr.pack(fill="x", padx=2, pady=(2, 1))
+        for col, w in [("Field Name", 32), ("Size", 6),
+                       ("Active (sent)", 26), ("Edit value", 0)]:
+            tk.Label(hdr, text=col, bg=self.CARD, fg=self.ACCENT,
+                     font=("Consolas", 9, "bold"), width=w,
+                     anchor="w").pack(side="left", padx=6, pady=3)
+
+        READ_ONLY_NET_FIELDS = {"appDataLength", "extHeaderLength"}
+
+        for name, size in NETWORK_FIELDS:
+            default_val = DEFAULT_NETWORK.get(name, "")
+            active_val  = self.active_net.get(name, default_val)
+            is_ro       = name in READ_ONLY_NET_FIELDS
+
+            row = tk.Frame(inner, bg=self.PANEL)
+            row.pack(fill="x", padx=2, pady=1)
+
+            tk.Label(row, text=name, bg=self.PANEL, fg=self.ACCENT2,
+                     font=("Consolas", 9), width=32, anchor="w"
+                     ).pack(side="left", padx=6)
+
+            tk.Label(row, text=str(size), bg=self.PANEL, fg=self.TXT2,
+                     font=("Consolas", 9), width=6, anchor="w"
+                     ).pack(side="left", padx=2)
+
+            tk.Label(row,
+                     text=repr(active_val),
+                     bg=self.PANEL,
+                     fg=self.TXT2 if is_ro else self.GREEN,
+                     font=("Consolas", 8), width=26, anchor="w"
+                     ).pack(side="left", padx=4)
+
+            var = tk.StringVar(value=str(default_val))
+            self.svars_net[name] = var
+
+            if is_ro:
+                tk.Label(row, text=f"fixed ({default_val}) — always 0 for network messages",
+                         bg=self.PANEL, fg=self.TXT2,
+                         font=("Consolas", 9, "italic")
+                         ).pack(side="left", padx=8)
+            else:
+                var.trace_add("write", self._on_field_changed)
+                tk.Entry(row, textvariable=var,
+                         bg=self.CARD, fg=self.TXT,
+                         insertbackground=self.TXT, relief="flat",
+                         font=("Consolas", 9), width=60
+                         ).pack(side="left", padx=4, pady=2,
+                                fill="x", expand=True)
+
     # ── Log panel ─────────────────────────────────────────────────────────────
 
     # ── Raw Data Parser tab ───────────────────────────────────────────────────
@@ -1031,7 +1353,7 @@ class FalconSimulator:
         tk.Label(opts, text="Force type:", bg=self.BG, fg=self.TXT2,
                  font=("Consolas", 9)).pack(side="left", padx=(0, 4))
         self._parser_force_type = tk.StringVar(value="auto")
-        for val, lbl_text in [("auto", "Auto-detect"), ("DBTRAN25", "DBTran25"), ("EXT10", "EXT10")]:
+        for val, lbl_text in [("auto", "Auto-detect"), ("DBTRAN25", "DBTran25"), ("EXT10", "EXT10"), ("NETWORK", "Network Support")]:
             tk.Radiobutton(
                 opts, text=lbl_text, variable=self._parser_force_type, value=val,
                 bg=self.BG, fg=self.TXT, selectcolor=self.CARD,
@@ -1152,8 +1474,8 @@ class FalconSimulator:
         (ASCII / HEX), optionally strip the 2-byte framing prefix, then
         call _parse_request() and render the result in _parser_output.
         """
-        raw_text = self._parser_input.get("1.0", "end-1c").strip()
-        if not raw_text:
+        raw_text = self._parser_input.get("1.0", "end-1c").rstrip("\r\n")
+        if not raw_text.strip():
             messagebox.showwarning("Empty Input", "Please paste some raw data first.")
             return
 
@@ -1191,6 +1513,32 @@ class FalconSimulator:
         except Exception:
             raw_str = raw_bytes.decode("latin-1", errors="replace")
 
+        # ── Check for Network Support Message override or auto-detection ──────
+        force = self._parser_force_type.get()
+        app_len_probe = raw_str[:8].strip()
+        ext_len_probe = raw_str[8:12].strip()
+        tran_probe    = raw_str[12:21].strip()
+
+        is_net = (
+            force == "NETWORK" or
+            (force == "auto" and (
+                tran_probe in NETWORK_TRANCODES or
+                tran_probe in (TRANCODE_PING_REQUEST, TRANCODE_PING_RESPONSE) or
+                (len(raw_str) == NETWORK_MESSAGE_SIZE and (app_len_probe in ("0", "00000000", "") or ext_len_probe in ("0", "0000", "")))
+            ))
+        )
+
+        if is_net:
+            hdr, body = parse_network_message(raw_str)
+            detected_type = (
+                "PING_REQUEST" if tran_probe == TRANCODE_PING_REQUEST
+                else ("PING_RESPONSE" if tran_probe == TRANCODE_PING_RESPONSE
+                else "NETWORK")
+            )
+            self._display_parsed_raw(
+                hdr, body, raw_str, detected_type, total_bytes, prefix_hex, 0)
+            return
+
         # ── Determine extHeaderLength from bytes ──────────────────────────────
         min_for_ext_len = INBOUND_FIXED_BEFORE_EXT  # 52
         if len(raw_str) < min_for_ext_len:
@@ -1208,7 +1556,6 @@ class FalconSimulator:
         hdr, body = self._parse_request(raw_str, ext_len)
 
         # ── Apply forced type override ────────────────────────────────────────
-        force = self._parser_force_type.get()
         if force != "auto":
             detected_type = force
         else:
@@ -1260,7 +1607,9 @@ class FalconSimulator:
         out.insert("end", "─" * 70 + "\n", "sep")
 
         # ── Header section ────────────────────────────────────────────────────
-        out.insert("end", "\n▸ HEADER  (ISO 124 — inbound)\n", "sec")
+        is_net = req_type in ("PING_REQUEST", "PING_RESPONSE", "NETWORK") or req_type.startswith("NETWORK")
+        sec_title = f"\n▸ NETWORK SUPPORT MESSAGE  ({req_type})\n" if is_net else "\n▸ HEADER  (ISO 124 — inbound)\n"
+        out.insert("end", sec_title, "sec")
         has_error = False
         for k, v in hdr.items():
             if k.startswith("_"):
@@ -1273,6 +1622,8 @@ class FalconSimulator:
                 out.insert("end", f"  [{v.strip()}]  ← echoed in response\n", "echo")
             elif k == "RESERVED_01":
                 out.insert("end", f"  [{v}]  (reserved)\n", "resv")
+            elif k == "tranCode" and is_net:
+                out.insert("end", f"  [{v.strip()}]  ({req_type})\n", "echo")
             else:
                 out.insert("end", f"  [{v.strip()}]\n", "val")
 
@@ -1289,7 +1640,7 @@ class FalconSimulator:
             for k, v in body.items():
                 out.insert("end", f"  {k:<44}", "fld")
                 out.insert("end", f"  [{v.strip()}]\n", "val")
-        else:
+        elif not is_net:
             out.insert("end", "\n  (no body parsed — message may be too short)\n", "warn")
 
         # ── Raw section ───────────────────────────────────────────────────────
@@ -1302,8 +1653,11 @@ class FalconSimulator:
         # Update status label
         n_hdr  = sum(1 for k in hdr if not k.startswith("_"))
         n_body = len(body)
-        status = (f"✅ {n_hdr} header field(s)  +  {n_body} body field(s)  "
-                  f"|  {req_type}")
+        if is_net:
+            status = f"✅ {n_hdr} network field(s)  |  {req_type}"
+        else:
+            status = (f"✅ {n_hdr} header field(s)  +  {n_body} body field(s)  "
+                      f"|  {req_type}")
         self._parser_status_lbl.config(
             text=status, fg=self.RED if has_error else self.GREEN)
 
@@ -1385,7 +1739,7 @@ class FalconSimulator:
         self.stop_btn.config(state="disabled")
 
     def _set_dot(self, text: str, colour: str):
-        self.root.after(0, lambda: self.dot.config(text=text, fg=colour))
+        self._safe_after(0, lambda: self.dot.config(text=text, fg=colour))
 
     def _accept_loop(self):
         self._log("Waiting for connection…", "info")
@@ -1447,44 +1801,136 @@ class FalconSimulator:
                 buf += chunk
 
                 # ── Dynamic buffer gating ────────────────────────────────────
-                # The header contains a dynamic-length externalHeaderData field.
-                # Phase 1: wait for enough bytes to read extHeaderLength (at offset 10–13
-                #          of the raw buf, i.e. prefix(2)+appDataLength(8)+extHeaderLength(4)).
+                # The header contains a dynamic-length externalHeaderData field for DBTRAN25/EXT10,
+                # or fixed 52 bytes for Network Support Messages (e.g. PING).
                 min_to_read_ext_len = INBOUND_PREFIX_LEN + INBOUND_FIXED_BEFORE_EXT  # 54
                 if len(buf) < min_to_read_ext_len:
                     self._log(f"Buffering… {len(buf)}/{min_to_read_ext_len}+ bytes", "info")
                     continue
 
-                # Phase 2: parse extHeaderLength and compute actual total expected bytes.
-                ext_len_raw = buf[INBOUND_PREFIX_LEN + 8 : INBOUND_PREFIX_LEN + 8 + 4]
-                try:
-                    ext_len = int(ext_len_raw.decode("ascii", errors="replace").strip())
-                except ValueError:
-                    ext_len = 20   # safe fallback
+                # Inspect fixed header fields for message type determination
+                app_len_raw = buf[INBOUND_PREFIX_LEN : INBOUND_PREFIX_LEN + 8].decode("ascii", errors="replace").strip()
+                ext_len_raw = buf[INBOUND_PREFIX_LEN + 8 : INBOUND_PREFIX_LEN + 8 + 4].decode("ascii", errors="replace").strip()
+                tran_cand   = buf[INBOUND_PREFIX_LEN + 8 + 4 : INBOUND_PREFIX_LEN + 8 + 4 + 9].decode("ascii", errors="replace").strip()
 
-                actual_total = (INBOUND_PREFIX_LEN + INBOUND_FIXED_BEFORE_EXT
-                                + ext_len + INBOUND_RESERVED_SIZE + INBOUND_BODY_SIZE)
+                is_network_msg = (
+                    tran_cand in NETWORK_TRANCODES or
+                    tran_cand in (TRANCODE_PING_REQUEST, TRANCODE_PING_RESPONSE) or
+                    (app_len_raw in ("0", "00000000", "") and ext_len_raw in ("0", "0000", ""))
+                )
+
+                if is_network_msg:
+                    actual_total = INBOUND_PREFIX_LEN + NETWORK_MESSAGE_SIZE  # 54 bytes
+                else:
+                    # Phase 2: parse extHeaderLength and compute actual total expected bytes for DBTRAN25 / EXT10.
+                    try:
+                        ext_len = int(ext_len_raw)
+                    except ValueError:
+                        ext_len = 20   # safe fallback
+
+                    actual_total = (INBOUND_PREFIX_LEN + INBOUND_FIXED_BEFORE_EXT
+                                    + ext_len + INBOUND_RESERVED_SIZE + INBOUND_BODY_SIZE)
 
                 if len(buf) < actual_total:
                     self._log(
                         f"Buffering… {len(buf)}/{actual_total} bytes "
-                        f"(extHeaderLength={ext_len})", "info")
+                        f"({'network message' if is_network_msg else f'extHeaderLength={ext_len}'})", "info")
                     continue   # keep reading, do NOT respond yet
 
                 # ── Full message is in buf — process exactly once ──────────────
-                # Strip leading 2-byte framing prefix before parsing.
-                prefix_hex = buf[:4].hex()   # diagnostic: log the raw prefix
-                payload = buf[2:]            # actual ISO-124 content starts here
+                msg_bytes = buf[:actual_total]
+                buf = buf[actual_total:]
+                prefix_hex = msg_bytes[:4].hex()   # diagnostic: log the raw prefix
+                payload = msg_bytes[INBOUND_PREFIX_LEN:]  # actual content starts after 2-byte prefix
 
                 try:
                     raw = payload.decode("ascii", errors="replace")
                 except Exception:
                     raw = payload.decode("latin-1", errors="replace")
 
+                # ── Branch: Network Support Message ───────────────────────────
+                if is_network_msg:
+                    self._log("─" * 55, "sep")
+                    self._log(
+                        f"Received complete network message from {addr[0]}:{addr[1]}"
+                        f"  |  total={len(msg_bytes)} bytes"
+                        f"  |  prefix hex: {prefix_hex}", "info")
+                    self._log(f"RAW IN ↓\n{raw}", "raw")
+
+                    hdr_d, body_d = parse_network_message(raw)
+                    tran_raw = hdr_d.get("tranCode", "").strip()
+
+                    # Flow B: Receive incoming PING_RESPONSE from REN
+                    if tran_raw == TRANCODE_PING_RESPONSE:
+                        self._last_request_type = "PING_RESPONSE"
+                        self._last_ping_response = hdr_d
+                        self._ping_event.set()
+                        self._log(
+                            f"🏷  Request type detected: PING_RESPONSE "
+                            f"(tranCode=[{tran_raw}], errorCode=[{hdr_d.get('errorCode', '').strip()}])", "success")
+                        self._safe_after(0,
+                            lambda h=hdr_d, b=body_d, r=raw:
+                                self._display_request(h, b, r))
+                        continue
+
+                    # Flow A: Receive incoming Network Request from REN (e.g. PING_REQUEST)
+                    if tran_raw == TRANCODE_PING_REQUEST:
+                        self._last_request_type = "PING_REQUEST"
+                    elif tran_raw in NETWORK_TRANCODES:
+                        self._last_request_type = f"NETWORK_{tran_raw}"
+                    else:
+                        self._last_request_type = "NETWORK_UNKNOWN"
+                        self._log(f"⚠  Unrecognized network tranCode: [{tran_raw}]", "warn")
+
+                    self._log(
+                        f"🏷  Request type detected: {self._last_request_type}  "
+                        f"(tranCode=[{tran_raw}])", "info")
+
+                    self._safe_after(0,
+                        lambda h=hdr_d, b=body_d, r=raw:
+                            self._display_request(h, b, r))
+
+                    # Generate response if applicable
+                    if tran_raw == TRANCODE_PING_REQUEST:
+                        resp = self._build_network_response(hdr_d)
+                    elif tran_raw == TRANCODE_STOP_SENDING_REQUEST:
+                        resp = self._build_network_response(hdr_d)
+                        resp = resp[:12] + TRANCODE_STOP_SENDING_RESPONSE + resp[21:]
+                    elif tran_raw == TRANCODE_START_SENDING_REQUEST:
+                        resp = self._build_network_response(hdr_d)
+                        resp = resp[:12] + TRANCODE_START_SENDING_RESPONSE + resp[21:]
+                    else:
+                        self._log(f"⚠  No response configured for tranCode [{tran_raw}] — handled safely", "warn")
+                        continue
+
+                    framed = "00" + resp
+                    delay = self.response_delay_seconds
+                    if delay > 0:
+                        self._log(
+                            f"⏳  Waiting {delay:g}s before sending "
+                            f"{self._last_request_type} response…", "warn")
+                        time.sleep(delay)
+
+                    try:
+                        with self._send_lock:
+                            conn.sendall(framed.encode("ascii"))
+                        delay_note = f" (after {delay:g}s delay)" if delay > 0 else ""
+                        self._log(
+                            f"✅  {self._last_request_type} Response sent "
+                            f"({len(framed)} bytes, incl. 2-byte '00' prefix) "
+                            f"— 1 response per request{delay_note}",
+                            "success")
+                        self._log(f"RAW OUT ↓\n{resp}", "raw")
+                    except Exception as ex:
+                        self._log(f"Send error: {ex}", "error")
+
+                    continue
+
+                # ── Branch: DBTRAN25 / EXT10 (Original path) ──────────────────
                 self._log("─" * 55, "sep")
                 self._log(
                     f"Received complete request from {addr[0]}:{addr[1]}"
-                    f"  |  total={len(buf)} bytes"
+                    f"  |  total={len(msg_bytes)} bytes"
                     f"  |  prefix hex: {prefix_hex}", "info")
                 self._log(f"RAW IN ↓\n{raw}", "raw")
 
@@ -1507,10 +1953,8 @@ class FalconSimulator:
 
                 # Read extHeaderLength directly from the inbound header and
                 # echo it back as-is (zero-padded to 4 digits).
-                # e.g. inbound extHeaderLength = "0032"  →  response extHeaderLength = "0032"
                 if "extHeaderLength" in hdr_d:
                     raw_hl = hdr_d["extHeaderLength"].strip()
-                    # Keep it exactly 4 chars, zero-padded
                     try:
                         self._last_ext_header_length = str(int(raw_hl)).zfill(4)
                     except ValueError:
@@ -1534,14 +1978,11 @@ class FalconSimulator:
                         if ef in body_d:
                             self.active_ext10_resp[ef] = body_d[ef]
 
-                self.root.after(0,
+                self._safe_after(0,
                     lambda h=hdr_d, b=body_d, r=raw:
                         self._display_request(h, b, r))
 
                 # ── Send exactly ONE response per complete request ─────────────
-                # Prepend the 2-byte "00" framing prefix that the Falcon plugin
-                # expects on every incoming message (mirrors the plugin-side:
-                #   strRawMessage = "00" + m_renMsg.GetTxValue(...)  )
                 resp   = self._build_response()
                 framed = "00" + resp          # add the 2-byte prefix
 
@@ -1554,7 +1995,8 @@ class FalconSimulator:
                     time.sleep(delay)
 
                 try:
-                    conn.sendall(framed.encode("ascii"))
+                    with self._send_lock:
+                        conn.sendall(framed.encode("ascii"))
                     delay_note = f" (after {delay:g}s delay)" if delay > 0 else ""
                     self._log(
                         f"✅  {self._last_request_type} Response sent "
@@ -1652,7 +2094,13 @@ class FalconSimulator:
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         self.req_text.insert("end", f"Received: {ts}\n", "ts")
         self.req_text.insert("end", "─" * 70 + "\n", "sep")
-        self.req_text.insert("end", "\n▸ HEADER  (ISO 124 incoming)\n", "sec")
+
+        is_net = (
+            self._last_request_type in ("PING_REQUEST", "PING_RESPONSE") or
+            self._last_request_type.startswith("NETWORK")
+        )
+        sec_title = f"\n▸ NETWORK SUPPORT MESSAGE  ({self._last_request_type})\n" if is_net else "\n▸ HEADER  (ISO 124 incoming)\n"
+        self.req_text.insert("end", sec_title, "sec")
 
         for k, v in hdr.items():
             if k.startswith("_"):
@@ -1666,6 +2114,9 @@ class FalconSimulator:
             elif k == "RESERVED_01":
                 self.req_text.insert(
                     "end", f"  [{v}]  (reserved — not echoed)\n", "resv")
+            elif k == "tranCode" and is_net:
+                self.req_text.insert(
+                    "end", f"  [{v.strip()}]  ({self._last_request_type})\n", "echo")
             else:
                 self.req_text.insert("end", f"  [{v.strip()}]\n", "val")
 
@@ -1742,6 +2193,7 @@ class FalconSimulator:
             "iso125":         copy.deepcopy(self.active125),
             "iso126":         copy.deepcopy(self.active126),
             "ext10_response": copy.deepcopy(self.active_ext10_resp),
+            "network":        copy.deepcopy(self.active_net),
         }
         try:
             with open(path, "w") as f:
@@ -1769,6 +2221,7 @@ class FalconSimulator:
             ("iso125",         self.svars125,          self.active125),
             ("iso126",         self.svars126,          self.active126),
             ("ext10_response", self.svars_ext10_resp,  self.active_ext10_resp),
+            ("network",        self.svars_net,         self.active_net),
         ):
             for k, v in data.get(section, {}).items():
                 active[k] = v           # commit immediately
